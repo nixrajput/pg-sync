@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install shellcheck
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck
+          fi
+
+      - name: Lint
+        run: make lint
+
+      - name: Build artifacts
+        run: bash scripts/build.sh --no-binary
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Deduplicate artifacts
+        run: |
+          mkdir -p release
+          # All matrix builds produce the same portable tarball; keep one copy.
+          # The build is reproducible because src/pg-sync is the only input.
+          find artifacts -type f -name "pg-sync-*.tar.gz" | head -1 | xargs -I {} cp {} release/
+          find artifacts -type f -name "pg-sync-*.tar.gz.sha256" | head -1 | xargs -I {} cp {} release/
+          ls -lh release/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

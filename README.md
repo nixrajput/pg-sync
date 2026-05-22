@@ -1,0 +1,166 @@
+# pg-sync
+
+> An interactive PostgreSQL dump / restore / sync helper for RDS-style remote databases.
+
+`pg-sync` is a single-file Bash CLI that turns the painful sequence of `pg_dump` → `pg_restore` into a guided, observable workflow. It is designed for developers who routinely pull production / staging snapshots into local PostgreSQL for development.
+
+## Table of contents
+
+- [pg-sync](#pg-sync)
+  - [Table of contents](#table-of-contents)
+  - [Highlights](#highlights)
+  - [Installation](#installation)
+    - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
+    - [One-liner installer (macOS / Linux / WSL)](#one-liner-installer-macos--linux--wsl)
+    - [Tarball](#tarball)
+    - [Windows](#windows)
+  - [Usage](#usage)
+  - [Requirements](#requirements)
+  - [Project Layout](#project-layout)
+  - [Development](#development)
+    - [Release process](#release-process)
+  - [Contributing](#contributing)
+  - [License](#license)
+
+## Highlights
+
+- **Three modes**: full sync, dump-only, restore-only — chosen from a menu.
+- **Smart table selection**: pick from a numbered list, type wildcards, or exclude specific tables' data.
+- **Live progress**: heartbeat every 10 seconds shows throughput and which tables are currently being dumped.
+- **Connection URLs**: paste `postgres://user:pass@host:5432/dbname` instead of entering five fields one by one.
+- **Restore-only mode**: pick from previously-saved dumps, restore individual tables or all of them, with schema+data or data-only modes.
+- **Pre/post stats**: per-table row counts and sizes before dump and after restore, paginated for large schemas.
+- **Safety**: never writes to the source database, warns about dangerous `postgresql.conf` settings on the target, supports `--dry-run`.
+
+## Installation
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap nixrajput/pg-sync
+brew install pg-sync
+```
+
+### One-liner installer (macOS / Linux / WSL)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nixrajput/pg-sync/main/scripts/install.sh | bash
+```
+
+This installs to `~/.local/bin/pg-sync` and adds that directory to your `PATH` if it isn't already there.
+
+### Tarball
+
+Download the latest release from [GitHub releases](https://github.com/nixrajput/pg-sync/releases), extract, and move `pg-sync` somewhere on your `PATH`:
+
+```bash
+tar -xzf pg-sync-1.0.0.tar.gz
+sudo mv pg-sync-1.0.0/bin/pg-sync /usr/local/bin/
+```
+
+### Windows
+
+Run inside **WSL 2** or **Git Bash for Windows**. Use any of the install methods above from within that environment. A native PowerShell port is on the roadmap — see [`windows/README.md`](windows/README.md).
+
+## Usage
+
+Just run it:
+
+```bash
+pg-sync
+```
+
+You'll get an interactive menu. Pick a mode and follow the prompts.
+
+For one-shot flags:
+
+```bash
+pg-sync --help        # full help with examples
+pg-sync --version     # print version
+pg-sync --dry-run     # validate inputs and print plan; no DB writes
+```
+
+## Requirements
+
+- **Bash 3.2+** (macOS ships 3.2.57; any modern Linux is 4+).
+- **PostgreSQL client tools**: `pg_dump`, `pg_restore`, `psql`. Install via:
+  - macOS: `brew install postgresql@16`
+  - Debian/Ubuntu: `apt install postgresql-client-16`
+  - RHEL/Fedora: `dnf install postgresql16`
+
+## Project Layout
+
+```
+.
+├── src/pg-sync                       # Canonical source (bash, the script you edit)
+├── bin/                              # Built launcher (from build.sh)
+├── dist/                             # Release tarballs and checksums (gitignored)
+├── scripts/
+│   ├── build.sh                      # Produces release artifacts
+│   └── install.sh                    # End-user installer (curl|bash target)
+├── Formula/pg-sync.rb                # Homebrew formula
+├── .github/
+│   ├── workflows/release.yml         # CI: tag-triggered release build
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── feature_request.yml
+│   │   └── config.yml                # Disables blank issues, links to Discussions
+│   └── PULL_REQUEST_TEMPLATE.md
+├── tests/                            # Smoke tests (run via `make test`)
+├── windows/                          # WSL/Git Bash notes; future PowerShell port
+├── Makefile                          # Developer convenience (lint/test/build)
+├── LICENSE                           # MIT
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md                # Contributor Covenant v2.1
+├── CONTRIBUTING.md                   # Contributor guide
+├── README.md
+├── RELEASING.md                      # Maintainer release runbook
+└── SECURITY.md                       # Vulnerability reporting policy
+```
+
+## Development
+
+```bash
+# Lint the script
+make lint
+
+# Run the smoke tests
+make test
+
+# Build release artifacts into dist/
+make build
+
+# Install your working copy locally (no need to commit/release)
+make install
+
+# Clean dist/ and bin/
+make clean
+```
+
+The source of truth is `src/pg-sync`. The `bin/` and `dist/` directories are generated by `scripts/build.sh` and should not be edited by hand.
+
+### Release process
+
+The full end-to-end runbook lives in [`RELEASING.md`](RELEASING.md). In short:
+
+1. Update `SCRIPT_VERSION` in `src/pg-sync` and add a `CHANGELOG.md` entry.
+2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`
+3. CI builds the artifacts and creates the GitHub Release.
+4. Manually update the Homebrew tap formula with the new sha256.
+
+## Contributing
+
+We welcome contributions of all sizes — bug fixes, docs improvements, new features. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR.
+
+Quick links:
+
+- 🐛 [File a bug report](https://github.com/nixrajput/pg-sync/issues/new?template=bug_report.yml)
+- ✨ [Request a feature](https://github.com/nixrajput/pg-sync/issues/new?template=feature_request.yml)
+- 💬 [Ask a question (Discussions)](https://github.com/nixrajput/pg-sync/discussions)
+- 🔒 [Report a security issue](SECURITY.md)
+- 🤝 [Code of Conduct](CODE_OF_CONDUCT.md)
+- 📦 [Release runbook (maintainers)](RELEASING.md)
+
+## License
+
+[MIT](LICENSE) © Nikhil Rajput

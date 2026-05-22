@@ -1,0 +1,96 @@
+name: Feature request
+description: Suggest a new feature or improvement to pg-sync.
+title: "[Feature] <short description>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement! A few quick notes before
+        you fill this out:
+
+        - For **questions** about how to use `pg-sync`, please use
+          [Discussions](https://github.com/nixrajput/pg-sync/discussions)
+          instead.
+        - For **bugs**, use the
+          [bug report template](https://github.com/nixrajput/pg-sync/issues/new?template=bug_report.yml).
+        - Search [existing requests](https://github.com/nixrajput/pg-sync/issues?q=label%3Aenhancement)
+          first — your idea may already be tracked.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: |
+        Describe the pain point. The clearer the problem, the better the
+        proposal. Examples:
+
+        - "When I run `pg-sync` against a 200-table DB, the include picker
+          is unusable — I have to scroll forever."
+        - "I want to schedule recurring dumps in cron, but the script is
+          interactive only."
+      placeholder: |
+        Right now …
+        Because of this …
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        What should `pg-sync` do instead? Be as concrete as you can —
+        flags, menu items, output format, etc.
+      placeholder: |
+        Add a `--non-interactive` mode that reads config from a YAML file …
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What other approaches did you think about? Why did you settle on
+        the one above?
+      placeholder: |
+        - Considered: env vars for every prompt. Rejected because …
+        - Considered: a TUI with fzf. Rejected because …
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope (your estimate)
+      options:
+        - Tiny (config change, new flag, ≤50 LOC)
+        - Small (one new function, ≤200 LOC)
+        - Medium (new mode or subcommand)
+        - Large (architectural change)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backwards_compat
+    attributes:
+      label: Backwards compatibility
+      options:
+        - Fully backwards-compatible (new opt-in flag/mode)
+        - Changes default behavior (existing users may notice)
+        - Breaking change (requires major version bump)
+    validations:
+      required: true
+
+  - type: textarea
+    id: extras
+    attributes:
+      label: Additional context
+      description: |
+        Links, screenshots, prior art from other tools, anything else.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Would you like to contribute this?
+      options:
+        - label: I'd be willing to open a PR for this if the maintainers agree on the design.

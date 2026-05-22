@@ -1,0 +1,127 @@
+name: Bug report
+description: Report a defect, crash, or unexpected behavior in pg-sync.
+title: "[Bug] <short description>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Before submitting,
+        please:
+
+        1. Search [existing issues](https://github.com/nixrajput/pg-sync/issues?q=is%3Aissue)
+           to make sure this hasn't been reported.
+        2. Try the latest release — your bug may already be fixed.
+        3. If this is a security issue, **do not open a public issue** —
+           see [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: pg-sync version
+      description: Output of `pg-sync --version`
+      placeholder: "pg-sync 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux x86_64
+        - Linux ARM64
+        - Windows (WSL 2)
+        - Windows (Git Bash)
+        - Other (please specify in details)
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: OS version
+      placeholder: "macOS 14.4, Ubuntu 22.04, …"
+    validations:
+      required: true
+
+  - type: input
+    id: pg_version
+    attributes:
+      label: PostgreSQL client version
+      description: Output of `pg_dump --version`
+      placeholder: "pg_dump (PostgreSQL) 16.4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Exact commands and the menu choices you made. Don't paraphrase —
+        copy the prompts verbatim where you can.
+      placeholder: |
+        1. Ran `pg-sync`
+        2. Chose option 1 (Full sync)
+        3. Pasted URL `postgres://…`
+        4. Selected tables 1, 3, 5
+        5. Got an error at step …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: "I expected the dump to start with 4 workers."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: "The script printed `error: …` and exited with code 1."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste the full output if possible. **Redact any passwords or
+        URLs that contain credentials before pasting.**
+      render: shell
+      placeholder: |
+        ==> Pre-flight checks
+          ✓ pg_dump → …
+          …
+          ✗ Error message here
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity (your opinion)
+      options:
+        - Blocker (script unusable for the intended task)
+        - Major (workflow broken, no workaround)
+        - Minor (workaround exists)
+        - Cosmetic (UI/UX issue only)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I'm on the latest release (or I can confirm the bug exists on the latest).
+          required: true
+        - label: I redacted credentials before pasting logs.
+          required: true

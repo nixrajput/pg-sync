@@ -1,0 +1,1617 @@
+#!/usr/bin/env bash
+#
+# pg-sync — PostgreSQL dump / restore / sync helper for RDS-style remote DBs
+#
+# Features
+# • Full sync, dump-only, or restore-only modes
+# • Paste a single postgres:// URL or enter fields one-by-one
+# • Whole-DB, table-subset, or wildcard-pattern selection
+# • Exclude-data list (data dropped, schema kept)
+# • Live heartbeat with throughput + currently-dumping tables
+# • Pre-dump and post-restore stats (size + row count, paginated)
+# • Detects and warns about dangerous postgresql.conf settings
+#
+# Source: https://github.com/<your-username>/pg-sync (edit before publish)
+# License: MIT (edit before publish)
+#
+# Usage:
+# ./sync_rds_to_local.sh # interactive
+# ./sync_rds_to_local.sh --help
+# ./sync_rds_to_local.sh --version
+# ./sync_rds_to_local.sh --dry-run # validate inputs, skip dump/restore
+#
+
+set -euo pipefail
+IFS=$' \t\n'
+
+# ============================================================================
+# Constants
+# ============================================================================
+readonly SCRIPT_NAME="pg-sync"
+readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
+
+DUMP_BASE_DIR="${PG_SYNC_DUMP_DIR:-$HOME/pg_dumps}"
+DRY_RUN=0
+SHOW_HELP=0
+SHOW_VERSION=0
+
+# Runtime state — populated by user input
+MODE="" # full-sync | dump-only | restore-only
+REMOTE_HOST="" REMOTE_PORT="" REMOTE_USER="" REMOTE_PASS="" REMOTE_DB=""
+LOCAL_HOST="" LOCAL_PORT="" LOCAL_USER="" LOCAL_PASS="" LOCAL_DB=""
+DUMP_DIR=""
+INCLUDE_TABLE_DATA=() # empty = all tables; otherwise --table=... allow-list
+EXCLUDE_TABLE_DATA=() # always applied on top of INCLUDE_TABLE_DATA
+INCLUDE_ARGS=()
+EXCLUDE_ARGS=()
+COMPRESSION_LEVEL=1
+JOBS=2
+CPUS=2
+RESTORE_MODE="" # clean | backfill | per-table
+RESTORE_TABLE_MODE="" # full | data-only (per-table only)
+RESTORE_TABLES=() # explicit list for per-table restore
+
+# ============================================================================
+# Colors & logging
+# ============================================================================
+if [[ -t 1 ]]; then
+    C_RESET=$'\033[0m' C_BOLD=$'\033[1m' C_DIM=$'\033[2m'
+    C_RED=$'\033[31m' C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m' C_MAGENTA=$'\033[35m' C_CYAN=$'\033[36m'
+else
+    C_RESET='' C_BOLD='' C_DIM=''
+    C_RED='' C_GREEN='' C_YELLOW='' C_BLUE='' C_MAGENTA='' C_CYAN=''
+fi
+
+# Timestamp helper — used ONLY for periodic monitors (heartbeat) and error logs
+# saved to disk. Interactive log lines stay clean, matching brew/npm/gh style.
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# Status icons + colors inspired by cargo, brew, gh, npm. Goal: low-decoration,
+# high-signal. No timestamps in interactive output — they add noise without value.
+#
+# IMPORTANT: ALL log helpers write to stderr so they never pollute captured
+# stdout in command substitutions like `result=$(my_helper)`. Functions that
+# return values use printf to stdout for the actual value only.
+log_info() {
+    printf '  %s•%s %s\n' "$C_DIM" "$C_RESET" "$*" >&2
+}
+log_step() {
+    printf '\n%s%s==>%s %s%s%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET" "$C_BOLD" "$*" "$C_RESET" >&2
+}
+log_ok() {
+    printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2
+}
+log_warn() {
+    printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2
+}
+log_error() {
+    printf '  %s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
+}
+
+banner() {
+    local title="$*"
+    local pad="────────────────────────────────────────────────────"
+    printf '\n%s%s%s%s\n' "$C_BOLD" "$C_CYAN" "$pad" "$C_RESET" >&2
+    printf '%s%s  %s%s\n' "$C_BOLD" "$C_CYAN" "$title" "$C_RESET" >&2
+    printf '%s%s%s%s\n\n' "$C_BOLD" "$C_CYAN" "$pad" "$C_RESET" >&2
+}
+
+# Prompt label, stderr-bound so $(...) command substitution doesn't eat it.
+# Single-line, no trailing newline so input lands on the same line.
+_prompt_label() {
+    printf '  %s›%s %s ' "$C_MAGENTA" "$C_RESET" "$1" >&2
+}
+
+# ============================================================================
+# Help / version
+# ============================================================================
+print_help() {
+    cat <<EOF
+${C_BOLD}${SCRIPT_NAME}${C_RESET} v${SCRIPT_VERSION}
+PostgreSQL dump / restore / sync helper for RDS-style remote databases.
+
+${C_BOLD}USAGE${C_RESET}
+  $(basename "$SCRIPT_PATH") [options]
+
+${C_BOLD}OPTIONS${C_RESET}
+  ${C_BOLD}-h, --help${C_RESET}     : Show this help and exit
+  ${C_BOLD}-V, --version${C_RESET}  : Print version and exit
+  ${C_BOLD}--dry-run${C_RESET}      : Validate inputs and print the plan; do NOT run pg_dump / pg_restore
+
+${C_BOLD}ENVIRONMENT${C_RESET}
+  ${C_BOLD}PG_SYNC_DUMP_DIR${C_RESET} : Override the base dump directory (default: \$HOME/pg_dumps)
+
+${C_BOLD}MODES${C_RESET} (chosen interactively after launch)
+  ${C_BOLD}1) Full sync${C_RESET}    : Dump from remote + restore to local
+  ${C_BOLD}2) Dump only${C_RESET}    : Snapshot remote, keep the dump on disk
+  ${C_BOLD}3) Restore only${C_RESET} : Load an existing local dump into a local database
+
+${C_BOLD}EXAMPLES${C_RESET}
+  ${C_DIM}# Interactive (most common):${C_RESET}
+  $(basename "$SCRIPT_PATH")
+
+  ${C_DIM}# Show this help:${C_RESET}
+  $(basename "$SCRIPT_PATH") --help
+
+  ${C_DIM}# Show version:${C_RESET}
+  $(basename "$SCRIPT_PATH") --version
+
+  ${C_DIM}# Dry-run (validate without dumping or restoring):${C_RESET}
+  $(basename "$SCRIPT_PATH") --dry-run
+
+  ${C_DIM}# Custom dump directory:${C_RESET}
+  PG_SYNC_DUMP_DIR=/Volumes/backup/pg $(basename "$SCRIPT_PATH")
+
+${C_BOLD}NOTES${C_RESET}
+  • Source DB is opened read-only — no writes to remote.
+  • All credentials are prompted interactively (silent for passwords / URLs).
+  • Dumps land in directory format (-Fd) for parallel dump/restore.
+  • Compression level is selectable (0-9). Default 1 = fast.
+
+For full documentation see the repository README.
+EOF
+}
+
+print_version() {
+    printf '%s %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+}
+
+# ============================================================================
+# CLI arg parsing
+# ============================================================================
+parse_cli_args() {
+    while (( $# > 0 )); do
+        case "$1" in
+            -h|--help) SHOW_HELP=1 ;;
+            -V|--version) SHOW_VERSION=1 ;;
+            --dry-run) DRY_RUN=1 ;;
+            --) shift; break ;;
+            -*) log_error "Unknown flag: $1 (use --help)"; exit 2 ;;
+            *) log_error "Unexpected argument: $1 (use --help)"; exit 2 ;;
+        esac
+        shift
+    done
+}
+
+# ============================================================================
+# Generic prompt helpers
+# ============================================================================
+confirm() {
+    local msg="$1" default="${2:-y}" hint reply
+    [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
+    while true; do
+        _prompt_label "$msg $hint"
+        read -r reply
+        reply="${reply:-$default}"
+        case "$reply" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+            [nN]|[nN][oO]) return 1 ;;
+            *) log_warn "Please answer y or n." ;;
+        esac
+    done
+}
+
+ask() {
+    local msg="$1" var
+    _prompt_label "$msg"
+    read -r var
+    printf '%s' "$var"
+}
+
+ask_secret() {
+    local msg="$1" var
+    _prompt_label "$msg"
+    read -r -s var
+    printf '\n' >&2
+    printf '%s' "$var"
+}
+
+ask_with_default() {
+    local msg="$1" default="$2" var
+    _prompt_label "$msg [${C_BOLD}$default${C_RESET}]"
+    read -r var
+    printf '%s' "${var:-$default}"
+}
+
+# Pick an integer in [lo, hi] with a default. Loops on invalid input.
+ask_choice() {
+    local msg="$1" lo="$2" hi="$3" default="$4" var
+    while true; do
+        _prompt_label "$msg [${lo}-${hi}, default: ${C_BOLD}$default${C_RESET}]"
+        read -r var
+        var="${var:-$default}"
+        if [[ "$var" =~ ^[0-9]+$ ]] && (( var >= lo && var <= hi )); then
+            printf '%s' "$var"
+            return 0
+        fi
+        log_warn "Please enter a number between $lo and $hi."
+    done
+}
+
+# Same as ask_choice, but also accepts 'b' (back) and returns the literal string
+# '__BACK__'. Callers check for that to navigate up one level. Used by submenus
+# where the user might want to return to the previous menu instead of pressing
+# ctrl-C and starting over.
+ask_choice_back() {
+    local msg="$1" lo="$2" hi="$3" default="$4" var
+    while true; do
+        _prompt_label "$msg [${lo}-${hi} or ${C_BOLD}b${C_RESET}=back, default: ${C_BOLD}$default${C_RESET}]"
+        read -r var
+        var="${var:-$default}"
+        if [[ "$var" == "b" || "$var" == "B" ]]; then
+            printf '%s' "__BACK__"
+            return 0
+        fi
+        if [[ "$var" =~ ^[0-9]+$ ]] && (( var >= lo && var <= hi )); then
+            printf '%s' "$var"
+            return 0
+        fi
+        log_warn "Please enter a number between $lo and $hi, or 'b' to go back."
+    done
+}
+
+# ============================================================================
+# URL parsing (percent-decoded)
+# ============================================================================
+url_decode() {
+    local s="${1//+/ }"
+    printf '%b' "${s//%/\\x}"
+}
+
+# Parse postgres://user:pass@host[:port]/dbname[?params] into REMOTE_* globals.
+# Returns 0 on success, 1 on failure (with log_error explaining).
+parse_remote_url() {
+    local url="$1" rest
+
+    if [[ "$url" =~ ^postgres(ql)?:// ]]; then
+        rest="${url#*://}"
+    else
+        log_error "URL must start with postgres:// or postgresql://"
+        return 1
+    fi
+
+    rest="${rest%%\?*}" # strip query string
+
+    if [[ "$rest" != *@* ]]; then
+        log_error "URL is missing user:password@ part."
+        return 1
+    fi
+    local userinfo="${rest%@*}" hostinfo="${rest##*@}"
+    local raw_user raw_pass
+    if [[ "$userinfo" == *:* ]]; then
+        raw_user="${userinfo%%:*}"
+        raw_pass="${userinfo#*:}"
+    else
+        raw_user="$userinfo"
+        raw_pass=""
+    fi
+
+    if [[ "$hostinfo" != */* ]]; then
+        log_error "URL is missing /dbname at the end."
+        return 1
+    fi
+    local hostport="${hostinfo%%/*}" raw_db="${hostinfo#*/}"
+    local raw_host raw_port
+    if [[ "$hostport" == *:* ]]; then
+        raw_host="${hostport%%:*}"
+        raw_port="${hostport##*:}"
+    else
+        raw_host="$hostport"
+        raw_port="5432"
+    fi
+
+    if [[ -z "$raw_host" || -z "$raw_user" || -z "$raw_db" ]]; then
+        log_error "URL is missing one of: host, user, dbname."
+        return 1
+    fi
+    if ! [[ "$raw_port" =~ ^[0-9]+$ ]]; then
+        log_error "Port '$raw_port' is not numeric."
+        return 1
+    fi
+
+    REMOTE_HOST="$(url_decode "$raw_host")"
+    REMOTE_PORT="$raw_port"
+    REMOTE_USER="$(url_decode "$raw_user")"
+    REMOTE_PASS="$(url_decode "$raw_pass")"
+    REMOTE_DB="$(url_decode "$raw_db")"
+    return 0
+}
+
+# ============================================================================
+# Misc helpers
+# ============================================================================
+
+# Build a conninfo string with libpq keepalives (so long COPYs survive NAT
+# eviction). Echoes the string; caller assigns it.
+make_conninfo() {
+    local host="$1" port="$2" user="$3" db="$4"
+    printf 'host=%s port=%s user=%s dbname=%s ' "$host" "$port" "$user" "$db"
+    printf 'keepalives=1 keepalives_idle=60 keepalives_interval=15 keepalives_count=10 '
+    printf 'connect_timeout=30'
+}
+
+# Run psql against the source with the standard env + options.
+psql_source() {
+    PGPASSWORD="$REMOTE_PASS" psql \
+        -h "$REMOTE_HOST" -p "$REMOTE_PORT" \
+        -U "$REMOTE_USER" -d "$REMOTE_DB" \
+        -v ON_ERROR_STOP=1 "$@"
+}
+
+# Run psql against the target (local) DB.
+psql_local() {
+    PGPASSWORD="$LOCAL_PASS" psql \
+        -h "$LOCAL_HOST" -p "$LOCAL_PORT" \
+        -U "$LOCAL_USER" "$@"
+}
+
+# Paginate stdin: emit N lines, prompt space/q, repeat. Skips paging when not a TTY.
+paginate() {
+    local page=${1:-30}
+    if [[ ! -t 1 ]] || [[ ! -t 0 ]]; then
+        cat
+        return 0
+    fi
+    local count=0 line
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+        count=$((count + 1))
+        if (( count >= page )); then
+            count=0
+            printf '%s-- press SPACE for more, q to stop --%s' "$C_DIM" "$C_RESET" >&2
+            local key
+            IFS= read -rsn1 key </dev/tty
+            printf '\r%*s\r' "$(tput cols 2>/dev/null || echo 80)" '' >&2
+            [[ "$key" == "q" || "$key" == "Q" ]] && return 0
+        fi
+    done
+}
+
+# Translate user's pg_dump-style glob to SQL ILIKE pattern.
+glob_to_like() {
+    local pat="${1//\*/%}"
+    pat="${pat//\?/_}"
+    printf '%s' "$pat"
+}
+
+# Translate to ERE for grep usage in dump verification.
+glob_to_ere() {
+    local pat="${1//\*/.*}"
+    pat="${pat//\?/.}"
+    printf '%s' "$pat"
+}
+
+# Escape a single value for safe inclusion in a SQL literal (doubles single quotes).
+sql_escape() {
+    printf "%s" "${1//\'/\'\'}"
+}
+
+# Format an unsigned bytes count as "X.YZ MB" etc.
+humanize_bytes() {
+    local b="$1"
+    if (( b >= 1099511627776 )); then printf '%.2f TB' "$(echo "scale=2; $b/1099511627776" | bc)"
+    elif (( b >= 1073741824 )); then printf '%.2f GB' "$(echo "scale=2; $b/1073741824" | bc)"
+    elif (( b >= 1048576 )); then printf '%.2f MB' "$(echo "scale=2; $b/1048576" | bc)"
+    elif (( b >= 1024 )); then printf '%.2f KB' "$(echo "scale=2; $b/1024" | bc)"
+    else printf '%d B' "$b"
+    fi
+}
+
+# ============================================================================
+# Pre-flight
+# ============================================================================
+preflight() {
+    log_step "Pre-flight checks"
+
+    local needed
+    case "$MODE" in
+        full-sync|dump-only) needed=(pg_dump pg_restore psql) ;;
+        restore-only) needed=(pg_restore psql) ;;
+        *) needed=(pg_dump pg_restore psql) ;;
+    esac
+
+    local cmd
+    for cmd in "${needed[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            log_error "$cmd not found in PATH. Install PostgreSQL client tools (e.g. 'brew install postgresql@16')."
+            exit 1
+        fi
+        log_ok "$cmd → $(command -v "$cmd")"
+    done
+
+    log_info "pg_dump version: $(pg_dump --version 2>/dev/null || echo n/a)"
+    log_info "psql version: $(psql --version 2>/dev/null || echo n/a)"
+
+    mkdir -p "$DUMP_BASE_DIR"
+    log_ok "Dump base directory ready: $DUMP_BASE_DIR"
+
+    local free_gb
+    if [[ "$(uname)" == "Darwin" ]]; then
+        free_gb=$(df -g "$DUMP_BASE_DIR" | awk 'NR==2 {print $4}')
+    else
+        free_gb=$(df -BG "$DUMP_BASE_DIR" | awk 'NR==2 {gsub("G",""); print $4}')
+    fi
+    log_info "Free space at dump location: ${free_gb} GB"
+    if [[ "$free_gb" =~ ^[0-9]+$ ]] && (( free_gb < 10 )); then
+        log_warn "Less than 10 GB free — large dumps may not fit."
+        confirm "Continue anyway?" n || { log_error "Aborted by user."; exit 1; }
+    fi
+}
+
+# ============================================================================
+# Mode selection
+# ============================================================================
+choose_mode() {
+    banner "$SCRIPT_NAME v$SCRIPT_VERSION"
+    log_info "Source DB is treated as READ ONLY — pg_dump never writes to remote."
+    log_info "Dump location base: $DUMP_BASE_DIR/{db_name}_dump"
+
+    local choice
+    while true; do
+        log_step "Main menu — what would you like to do?"
+        echo " ${C_BOLD}1)${C_RESET} ${C_GREEN}Full sync${C_RESET}    : dump remote → restore to local ${C_DIM}(most common)${C_RESET}"
+        echo " ${C_BOLD}2)${C_RESET} ${C_BLUE}Dump only${C_RESET}    : snapshot a remote DB; keep dump on disk"
+        echo " ${C_BOLD}3)${C_RESET} ${C_MAGENTA}Restore only${C_RESET} : load an existing dump into a local DB"
+        echo " ${C_BOLD}4)${C_RESET} ${C_CYAN}Help${C_RESET}         : show usage, options and examples"
+        echo " ${C_BOLD}5)${C_RESET} ${C_CYAN}Version${C_RESET}      : print $SCRIPT_NAME version"
+        echo " ${C_BOLD}6)${C_RESET} ${C_YELLOW}Quit${C_RESET}         : exit without doing anything"
+
+        choice=$(ask_choice "Choose" 1 6 1)
+        case "$choice" in
+            1) MODE="full-sync"; break ;;
+            2) MODE="dump-only"; break ;;
+            3) MODE="restore-only"; break ;;
+            4)
+                echo
+                print_help
+                echo
+                log_info "Press Enter to return to the main menu…"
+                read -r _
+                ;;
+            5)
+                echo
+                print_version
+                echo
+                log_info "Press Enter to return to the main menu…"
+                read -r _
+                ;;
+            6)
+                log_info "Goodbye."
+                exit 0
+                ;;
+        esac
+    done
+    log_ok "Mode: ${C_BOLD}$MODE${C_RESET}"
+}
+
+# ============================================================================
+# Credentials
+# ============================================================================
+gather_remote_credentials() {
+    log_step "Remote (source) database credentials"
+    echo " ${C_BOLD}1)${C_RESET} Paste a single connection URL ${C_DIM}(e.g. postgres://user:pass@host:5432/dbname)${C_RESET}"
+    echo " ${C_BOLD}2)${C_RESET} Enter fields one by one"
+    local cred_choice
+    cred_choice=$(ask_choice "Choose" 1 2 1)
+
+    if [[ "$cred_choice" == "1" ]]; then
+        while true; do
+            local url
+            url=$(ask_secret "Remote connection URL:")
+            if parse_remote_url "$url"; then
+                log_ok "Parsed URL:"
+                log_info " Host: ${C_BOLD}$REMOTE_HOST${C_RESET}"
+                log_info " Port: ${C_BOLD}$REMOTE_PORT${C_RESET}"
+                log_info " User: ${C_BOLD}$REMOTE_USER${C_RESET}"
+                log_info " DB: ${C_BOLD}$REMOTE_DB${C_RESET}"
+                local pw_len; pw_len=$(printf '%s' "$REMOTE_PASS" | wc -c | tr -d ' ')
+                log_info " Password: ${C_DIM}(hidden, $pw_len chars)${C_RESET}"
+                break
+            fi
+            log_warn "Could not parse that URL. Please try again."
+        done
+    else
+        REMOTE_HOST=$(ask "Remote host (e.g. mydb.xxxx.rds.amazonaws.com):")
+        REMOTE_PORT=$(ask_with_default "Remote port:" "5432")
+        REMOTE_USER=$(ask "Remote username:")
+        REMOTE_PASS=$(ask_secret "Remote password:")
+        REMOTE_DB=$(ask "Remote database name:")
+    fi
+}
+
+gather_local_credentials() {
+    log_step "Local (target) database credentials"
+    LOCAL_HOST=$(ask_with_default "Local host:" "localhost")
+    LOCAL_PORT=$(ask_with_default "Local port:" "5432")
+    LOCAL_USER=$(ask_with_default "Local username:" "$USER")
+    LOCAL_PASS=$(ask_secret "Local password (press Enter if none):")
+    local default_db="${REMOTE_DB:-}"
+    if [[ -n "$default_db" ]]; then
+        LOCAL_DB=$(ask_with_default "Local database name:" "$default_db")
+    else
+        LOCAL_DB=$(ask "Local database name:")
+    fi
+}
+
+# ============================================================================
+# Source connection test
+# ============================================================================
+test_source_connection() {
+    while true; do
+        log_step "Testing source connection"
+        log_info "Connecting to $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB …"
+        if psql_source -tAc "SELECT 1;" >/dev/null 2>&1; then
+            log_ok "Source connection OK."
+            return 0
+        fi
+        log_error "Could not connect to source DB. Check host/port/user/password and network."
+        echo
+        echo " ${C_BOLD}1)${C_RESET} Re-enter remote credentials and retry"
+        echo " ${C_BOLD}2)${C_RESET} Quit"
+        local retry; retry=$(ask_choice "Choose" 1 2 1)
+        case "$retry" in
+            1) gather_remote_credentials ;;
+            2) log_info "Goodbye."; exit 0 ;;
+        esac
+    done
+}
+
+# ============================================================================
+# Table list + table-subset selection
+# ============================================================================
+list_source_user_tables() {
+    psql_source -tA -F '|' <<'SQL'
+SELECT n.nspname || '.' || c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'm')
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'rdsadmin')
+ORDER BY n.nspname, c.relname;
+SQL
+}
+
+# Normalize a free-form list of comma-separated table names: trim, auto-prefix '*.'
+# if no schema given, drop empties. Echoes one normalized name per line.
+normalize_table_list() {
+    local raw="$1" IFS=','
+    local entry trimmed
+    for entry in $raw; do
+        trimmed="${entry#"${entry%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        [[ -z "$trimmed" ]] && continue
+        if [[ "$trimmed" != *.* ]]; then
+            trimmed="*.$trimmed"
+        fi
+        printf '%s\n' "$trimmed"
+    done
+}
+
+# Build INCLUDE_TABLE_DATA from a list of source tables presented to the user.
+# Modes: 1 = all, 2 = pick from list, 3 = type names.
+choose_include_tables() {
+    while true; do
+        log_step "Tables to INCLUDE in dump"
+        echo " ${C_BOLD}1)${C_RESET} ${C_GREEN}All tables${C_RESET} ${C_DIM}(default — exclusion list still applies)${C_RESET}"
+        echo " ${C_BOLD}2)${C_RESET} Pick specific tables from a list"
+        echo " ${C_BOLD}3)${C_RESET} Type names with wildcards (e.g. 'users, orders, audit_*')"
+
+        local choice
+        choice=$(ask_choice "Choose" 1 3 1)
+        INCLUDE_TABLE_DATA=()
+
+        case "$choice" in
+            1)
+                log_info "Including all tables."
+                return 0
+                ;;
+            2)
+                log_info "Fetching table list from source…"
+                local tables=()
+                while IFS= read -r t; do tables+=("$t"); done < <(list_source_user_tables)
+                if (( ${#tables[@]} == 0 )); then
+                    log_warn "No user tables found. Including all (no-op)."
+                    return 0
+                fi
+                log_info "Found ${#tables[@]} table(s). Showing list:"
+                local i
+                for (( i=0; i<${#tables[@]}; i++ )); do
+                    printf ' %s%3d)%s %s\n' "$C_BOLD" "$((i+1))" "$C_RESET" "${tables[i]}"
+                done | paginate 30
+                echo
+                log_info "Enter comma-separated numbers and/or ranges (e.g. 1,3,5-8), 'all' for all, or 'b' to go back."
+                local raw
+                _prompt_label "Pick:"
+                read -r raw
+                if [[ "$raw" == "b" || "$raw" == "B" ]]; then
+                    continue
+                fi
+                if [[ "$raw" == "all" || -z "${raw// /}" ]]; then
+                    log_info "Including all tables."
+                    return 0
+                fi
+                local IFS_save=$IFS IFS=','
+                for part in $raw; do
+                    part="${part// /}"
+                    [[ -z "$part" ]] && continue
+                    if [[ "$part" == *-* ]]; then
+                        local lo="${part%-*}" hi="${part#*-}"
+                        if [[ "$lo" =~ ^[0-9]+$ && "$hi" =~ ^[0-9]+$ ]]; then
+                            local n
+                            for (( n=lo; n<=hi; n++ )); do
+                                (( n >= 1 && n <= ${#tables[@]} )) && INCLUDE_TABLE_DATA+=("${tables[n-1]}")
+                            done
+                        else
+                            log_warn "Skipping invalid range '$part'."
+                        fi
+                    elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                        (( part >= 1 && part <= ${#tables[@]} )) && INCLUDE_TABLE_DATA+=("${tables[part-1]}")
+                    else
+                        log_warn "Skipping invalid token '$part'."
+                    fi
+                done
+                IFS=$IFS_save
+                ;;
+            3)
+                echo " ${C_DIM}Wildcards: '*' = any chars, '?' = one char. Unqualified names match any schema. Type 'b' to go back.${C_RESET}"
+                local raw
+                _prompt_label "Tables to include:"
+                read -r raw
+                if [[ "$raw" == "b" || "$raw" == "B" ]]; then
+                    continue
+                fi
+                if [[ -z "${raw// /}" ]]; then
+                    log_info "Empty input — including all."
+                    return 0
+                fi
+                while IFS= read -r t; do INCLUDE_TABLE_DATA+=("$t"); done < <(normalize_table_list "$raw")
+                ;;
+        esac
+
+        if (( ${#INCLUDE_TABLE_DATA[@]} == 0 )); then
+            log_warn "Include list is empty after parsing."
+            log_info "Returning to include-table menu…"
+            echo
+            continue
+        fi
+        break
+    done
+    log_ok "Including ${#INCLUDE_TABLE_DATA[@]} table(s)/pattern(s):"
+    local t
+    for t in "${INCLUDE_TABLE_DATA[@]}"; do echo " - $t"; done
+}
+
+# ============================================================================
+# Exclusion list
+# ============================================================================
+gather_exclusions() {
+    log_step "Tables to EXCLUDE data from (schema still dumped)"
+    echo " ${C_DIM}Examples:${C_RESET}"
+    echo " ${C_DIM} audit_logs, user_sessions (matches any schema)${C_RESET}"
+    echo " ${C_DIM} public.events, analytics.metrics (schema-qualified)${C_RESET}"
+    echo " ${C_DIM} logs_*, solid_queue_* (wildcards allowed)${C_RESET}"
+    echo " ${C_DIM} Leave empty to dump ALL data with no exclusions.${C_RESET}"
+    _prompt_label "Tables to exclude data from:"
+    local raw
+    read -r raw
+
+    EXCLUDE_TABLE_DATA=()
+    if [[ -z "${raw// /}" ]]; then
+        log_info "No exclusions — full data dump."
+        return 0
+    fi
+    while IFS= read -r t; do EXCLUDE_TABLE_DATA+=("$t"); done < <(normalize_table_list "$raw")
+
+    if (( ${#EXCLUDE_TABLE_DATA[@]} == 0 )); then
+        log_warn "No valid names parsed — no exclusions applied."
+        return 0
+    fi
+    log_info "Parsed ${#EXCLUDE_TABLE_DATA[@]} exclusion pattern(s):"
+    local t
+    for t in "${EXCLUDE_TABLE_DATA[@]}"; do echo " - $t"; done
+}
+
+# ============================================================================
+# Build pg_dump --table=/--exclude-table-data= arg arrays
+# ============================================================================
+build_dump_args() {
+    INCLUDE_ARGS=()
+    EXCLUDE_ARGS=()
+    local t
+    for t in "${INCLUDE_TABLE_DATA[@]}"; do
+        INCLUDE_ARGS+=(--table="$t")
+    done
+    for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+        EXCLUDE_ARGS+=(--exclude-table-data="$t")
+    done
+}
+
+# ============================================================================
+# Full table stats query (size + row count). Used pre-dump (source) AND
+# post-restore (target). Excludes patterns listed in EXCLUDE_TABLE_DATA.
+# ============================================================================
+build_excluded_sql_arrays() {
+    # Echoes two lines: excluded_sql then excluded_orig_sql.
+    local translated=() originals=()
+    local t pat safe_t safe_o
+    if (( ${#EXCLUDE_TABLE_DATA[@]} > 0 )); then
+        for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+            pat=$(glob_to_like "$t")
+            safe_t=$(sql_escape "$pat")
+            safe_o=$(sql_escape "$t")
+            translated+=("'$safe_t'")
+            originals+=("'$safe_o'")
+        done
+        local IFS=','
+        printf 'ARRAY[%s]\n' "${translated[*]}"
+        printf 'ARRAY[%s]\n' "${originals[*]}"
+    else
+        printf 'ARRAY[]::text[]\n'
+        printf 'ARRAY[]::text[]\n'
+    fi
+}
+
+# Query a database for full per-table stats. Args:
+# $1 = "source" or "target" (which psql wrapper to use)
+# Echoes pipe-separated: schema.table|rows|bytes|pretty_size
+fetch_table_stats() {
+    local target="$1"
+    local arrays excluded_sql excluded_orig_sql
+    arrays=$(build_excluded_sql_arrays)
+    excluded_sql=$(echo "$arrays" | sed -n '1p')
+    excluded_orig_sql=$(echo "$arrays" | sed -n '2p')
+    # Reference excluded_orig_sql so shellcheck doesn't flag it as unused;
+    # it's reserved for diagnostic queries that may want the original patterns.
+    : "$excluded_orig_sql"
+
+    local sql
+    sql=$(cat <<SQL
+WITH excluded AS (
+    SELECT unnest($excluded_sql) AS pattern
+),
+tables AS (
+    SELECT
+        n.nspname || '.' || c.relname AS qname,
+        c.oid,
+        c.reltuples::bigint AS est_rows,
+        pg_total_relation_size(c.oid) AS bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'm')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'rdsadmin')
+)
+SELECT
+    qname,
+    est_rows,
+    bytes,
+    pg_size_pretty(bytes)
+FROM tables t
+WHERE NOT EXISTS (SELECT 1 FROM excluded e WHERE t.qname ILIKE e.pattern)
+ORDER BY bytes DESC, qname;
+SQL
+)
+
+    if [[ "$target" == "source" ]]; then
+        psql_source -tA -F '|' -c "$sql"
+    else
+        psql_local -d "$LOCAL_DB" -tA -F '|' -c "$sql"
+    fi
+}
+
+# Render table stats in a human-friendly table with paging.
+render_stats() {
+    local title="$1" raw="$2"
+    log_step "$title"
+    if [[ -z "${raw// /}" ]]; then
+        log_info "(no tables matched)"
+        return 0
+    fi
+    local total_rows=0 total_bytes=0 count=0
+    {
+        printf ' %-50s %15s %12s\n' "TABLE" "ROWS (est.)" "SIZE"
+        printf ' %-50s %15s %12s\n' "$(printf -- '-%.0s' {1..50})" "---------------" "------------"
+        local qname rows bytes pretty
+        while IFS='|' read -r qname rows bytes pretty; do
+            [[ -z "$qname" ]] && continue
+            printf ' %-50s %15s %12s\n' "$qname" "$(printf "%'d" "$rows" 2>/dev/null || echo "$rows")" "$pretty"
+            total_rows=$((total_rows + rows))
+            total_bytes=$((total_bytes + bytes))
+            count=$((count + 1))
+        done <<< "$raw"
+        printf ' %-50s %15s %12s\n' "$(printf -- '-%.0s' {1..50})" "---------------" "------------"
+        printf ' %-50s %15s %12s\n' "TOTAL ($count tables)" \
+            "$(printf "%'d" "$total_rows" 2>/dev/null || echo "$total_rows")" \
+            "$(humanize_bytes "$total_bytes")"
+    } | paginate 30
+}
+
+# ============================================================================
+# Size estimate + unmatched exclusion handling
+# ============================================================================
+test_source_and_estimate_size() {
+    log_step "Estimating dump size after exclusions"
+
+    local arrays excluded_sql excluded_orig_sql
+    arrays=$(build_excluded_sql_arrays)
+    excluded_sql=$(echo "$arrays" | sed -n '1p')
+    excluded_orig_sql=$(echo "$arrays" | sed -n '2p')
+
+    local size_output
+    size_output=$(psql_source -tA -F '|' <<SQL 2>/dev/null
+WITH excluded AS (
+    SELECT
+        t.pattern,
+        o.pattern AS pattern_orig
+    FROM unnest($excluded_sql) WITH ORDINALITY AS t(pattern, idx)
+    JOIN unnest($excluded_orig_sql) WITH ORDINALITY AS o(pattern, idx)
+        ON t.idx = o.idx
+),
+tables AS (
+    SELECT
+        n.nspname || '.' || c.relname AS qname,
+        pg_total_relation_size(c.oid) AS bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'm')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'rdsadmin')
+),
+table_matches AS (
+    SELECT
+        t.qname,
+        t.bytes,
+        EXISTS (SELECT 1 FROM excluded e WHERE t.qname ILIKE e.pattern) AS is_excluded
+    FROM tables t
+),
+unmatched AS (
+    SELECT e.pattern_orig AS pattern
+    FROM excluded e
+    WHERE NOT EXISTS (SELECT 1 FROM tables t WHERE t.qname ILIKE e.pattern)
+)
+SELECT
+    pg_size_pretty(pg_database_size('$(sql_escape "$REMOTE_DB")')),
+    pg_size_pretty(COALESCE(SUM(bytes) FILTER (WHERE NOT is_excluded), 0)),
+    pg_size_pretty(COALESCE(SUM(bytes) FILTER (WHERE is_excluded), 0)),
+    (
+        SELECT COUNT(*)
+        FROM excluded e
+        WHERE EXISTS (SELECT 1 FROM tables t WHERE t.qname ILIKE e.pattern)
+    ),
+    (SELECT COALESCE(string_agg(pattern, ','), '') FROM unmatched)
+FROM table_matches;
+SQL
+)
+
+    if [[ -z "$size_output" ]]; then
+        log_warn "Size estimate query returned nothing. Continuing without estimate."
+        return 0
+    fi
+
+    local total_h included_h excluded_h matched unmatched_csv
+    IFS='|' read -r total_h included_h excluded_h matched unmatched_csv <<< "$size_output"
+
+    echo " ${C_BOLD}Total DB size on source:${C_RESET} $total_h"
+    echo " ${C_BOLD}Data to dump (uncompressed):${C_RESET} $included_h ${C_DIM}(on-disk dump will be smaller after compression)${C_RESET}"
+    if (( ${#EXCLUDE_TABLE_DATA[@]} > 0 )); then
+        echo " ${C_BOLD}Data skipped by exclusions:${C_RESET} $excluded_h"
+        echo " ${C_BOLD}Excluded patterns matched:${C_RESET} $matched of ${#EXCLUDE_TABLE_DATA[@]}"
+        if [[ -n "$unmatched_csv" ]]; then
+            log_warn "These exclusion patterns did NOT match any table:"
+            local u IFS=','
+            for u in $unmatched_csv; do
+                echo " ${C_YELLOW}- $u${C_RESET}"
+            done
+            unset IFS
+            handle_unmatched_exclusions "$unmatched_csv"
+        fi
+    fi
+}
+
+handle_unmatched_exclusions() {
+    local unmatched_csv="$1"
+    local unmatched=()
+    local IFS=','
+    for u in $unmatched_csv; do unmatched+=("$u"); done
+    unset IFS
+
+    echo
+    echo " ${C_BOLD}What to do?${C_RESET}"
+    echo " ${C_BOLD}1)${C_RESET} Correct them now (re-enter each unmatched name)"
+    echo " ${C_BOLD}2)${C_RESET} Drop them and continue (recommended)"
+    echo " ${C_BOLD}3)${C_RESET} Re-enter the entire exclusion list from scratch"
+    echo " ${C_BOLD}4)${C_RESET} Quit"
+    local choice
+    choice=$(ask_choice "Choose" 1 4 2)
+
+    case "$choice" in
+        2)
+            log_info "Dropping unmatched entries."
+            local kept=() t u skip
+            for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+                skip=0
+                for u in "${unmatched[@]}"; do
+                    [[ "$t" == "$u" ]] && skip=1 && break
+                done
+                (( skip == 0 )) && kept+=("$t")
+            done
+            EXCLUDE_TABLE_DATA=("${kept[@]}")
+            log_ok "Exclusion list now has ${#EXCLUDE_TABLE_DATA[@]} entry/entries."
+            ;;
+        3)
+            log_info "Re-entering exclusion list from scratch…"
+            gather_exclusions
+            test_source_and_estimate_size
+            return $?
+            ;;
+        4)
+            log_info "Goodbye."
+            exit 0
+            ;;
+        *)
+            log_info "Enter replacements (empty reply = drop that entry)."
+            local replacements=() u repl
+            for u in "${unmatched[@]}"; do
+                _prompt_label "Replacement for '${C_YELLOW}$u${C_RESET}' (empty = drop):"
+                read -r repl
+                repl="${repl## }"; repl="${repl%% }"
+                if [[ -n "$repl" ]]; then
+                    [[ "$repl" != *.* ]] && repl="*.$repl"
+                    replacements+=("$repl")
+                fi
+            done
+            local rebuilt=() t is_um
+            for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+                is_um=0
+                for u in "${unmatched[@]}"; do
+                    [[ "$t" == "$u" ]] && is_um=1 && break
+                done
+                (( is_um == 0 )) && rebuilt+=("$t")
+            done
+            rebuilt+=("${replacements[@]}")
+            EXCLUDE_TABLE_DATA=("${rebuilt[@]}")
+            log_ok "Updated list:"
+            for t in "${EXCLUDE_TABLE_DATA[@]}"; do echo " - $t"; done
+            log_info "Re-validating against source…"
+            test_source_and_estimate_size
+            ;;
+    esac
+}
+
+# ============================================================================
+# Performance knobs
+# ============================================================================
+detect_jobs() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        CPUS=$(sysctl -n hw.ncpu)
+    else
+        CPUS=$(nproc)
+    fi
+    if (( CPUS >= 8 )); then JOBS=4
+    elif (( CPUS >= 4 )); then JOBS=$((CPUS - 1))
+    else JOBS=2
+    fi
+    log_info "Detected $CPUS CPUs → ${C_BOLD}-j $JOBS${C_RESET}"
+}
+
+choose_compression() {
+    log_step "Compression level"
+    echo " ${C_DIM}Higher = smaller dump but slower. Lower = faster but larger.${C_RESET}"
+    echo " ${C_BOLD}0)${C_RESET} None ${C_DIM}— fastest, largest on disk${C_RESET}"
+    echo " ${C_BOLD}1)${C_RESET} Fast ${C_DIM}— recommended for transient dumps${C_RESET}"
+    echo " ${C_BOLD}3)${C_RESET} Balanced"
+    echo " ${C_BOLD}6)${C_RESET} Default ${C_DIM}— pg_dump's built-in default${C_RESET}"
+    echo " ${C_BOLD}9)${C_RESET} Maximum ${C_DIM}— smallest, slowest${C_RESET}"
+    local raw
+    _prompt_label "Compression [0-9, default: ${C_BOLD}1${C_RESET}]:"
+    read -r raw
+    raw="${raw:-1}"
+    if ! [[ "$raw" =~ ^[0-9]$ ]]; then
+        log_warn "Invalid '$raw' — using 1."
+        raw=1
+    fi
+    COMPRESSION_LEVEL="$raw"
+    log_ok "Compression: ${C_BOLD}-Z $COMPRESSION_LEVEL${C_RESET}"
+}
+
+# ============================================================================
+# Plan + confirm
+# ============================================================================
+show_plan_and_confirm() {
+    log_step "Plan summary"
+    echo " ${C_BOLD}Mode:${C_RESET} $MODE"
+    if [[ "$MODE" != "restore-only" ]]; then
+        echo " ${C_BOLD}Source (READ ONLY):${C_RESET} $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
+    fi
+    if [[ "$MODE" != "dump-only" ]]; then
+        echo " ${C_BOLD}Target:${C_RESET} $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT/$LOCAL_DB"
+    fi
+    echo " ${C_BOLD}Dump directory:${C_RESET} $DUMP_DIR"
+    if [[ "$MODE" != "restore-only" ]]; then
+        if (( ${#INCLUDE_TABLE_DATA[@]} > 0 )); then
+            echo " ${C_BOLD}Include tables:${C_RESET} ${INCLUDE_TABLE_DATA[*]}"
+        else
+            echo " ${C_BOLD}Include tables:${C_RESET} ${C_DIM}(all)${C_RESET}"
+        fi
+        if (( ${#EXCLUDE_TABLE_DATA[@]} > 0 )); then
+            echo " ${C_BOLD}Exclude data:${C_RESET} ${EXCLUDE_TABLE_DATA[*]}"
+        else
+            echo " ${C_BOLD}Exclude data:${C_RESET} ${C_DIM}(none)${C_RESET}"
+        fi
+        echo " ${C_BOLD}Compression (-Z):${C_RESET} $COMPRESSION_LEVEL"
+    fi
+    echo " ${C_BOLD}Parallelism (-j):${C_RESET} $JOBS"
+    if [[ "$MODE" != "dump-only" ]]; then
+        echo " ${C_BOLD}Restore mode:${C_RESET} ${RESTORE_MODE:-(decided after dump)}"
+    fi
+    if (( DRY_RUN )); then
+        log_warn "DRY RUN: validating only — no dump or restore will be performed."
+    fi
+    confirm "Proceed with these settings?" y || { log_error "Aborted by user."; exit 1; }
+}
+
+# ============================================================================
+# Dump
+# ============================================================================
+do_dump() {
+    log_step "Dumping remote database"
+    log_info "Source: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB (READ-ONLY)"
+
+    if [[ -d "$DUMP_DIR" ]]; then
+        log_warn "Dump directory already exists: $DUMP_DIR"
+        if confirm "Delete and re-dump?" y; then
+            rm -rf "$DUMP_DIR"
+            log_ok "Removed old dump."
+        else
+            log_info "Reusing existing dump."
+            return 0
+        fi
+    fi
+
+    confirm "${C_BOLD}${C_YELLOW}Start dumping now?${C_RESET} (read-only on source)" y \
+        || { log_error "Aborted by user."; exit 1; }
+
+    if (( DRY_RUN )); then
+        log_warn "DRY RUN: skipping pg_dump."
+        return 0
+    fi
+
+    log_info "Starting pg_dump…"
+    log_info "Tip: pg_dump parallelises PER TABLE — one giant table = one slow worker."
+    log_info " Heartbeat will tick every 10s with throughput and active tables."
+
+    local pg_dump_log="${DUMP_DIR}.pg_dump.log"
+    : > "$pg_dump_log"
+
+    local heartbeat_out="/dev/stderr"
+    if { : > /dev/tty; } 2>/dev/null; then
+        heartbeat_out="/dev/tty"
+    fi
+
+    local started_at; started_at=$(date +%s)
+    (
+        # Diagnostic loop — never let strict mode kill us.
+        set +eo pipefail
+        local prev_bytes=0
+        printf "  %s◐%s heartbeat started — ticks every 10s (output → %s)\n" \
+            "$C_BLUE" "$C_RESET" "$heartbeat_out" >> "$heartbeat_out"
+        while true; do
+            sleep 10
+            [[ -d "$DUMP_DIR" ]] || continue
+            local sz_bytes sz_h now elapsed workers throughput in_flight
+            sz_bytes=$(du -sk "$DUMP_DIR" 2>/dev/null | awk '{print $1 * 1024}')
+            sz_h=$(du -sh "$DUMP_DIR" 2>/dev/null | awk '{print $1}')
+            now=$(date +%s); elapsed=$(( now - started_at ))
+            workers=$(pgrep -f "pg_dump .*-d " 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+            throughput=$(( (sz_bytes - prev_bytes) / 1024 / 10 ))
+            prev_bytes=$sz_bytes
+
+            in_flight=""
+            if [[ -s "$pg_dump_log" ]]; then
+                in_flight=$(awk '
+                    /dumping contents of table/ {
+                        match($0, /"[^"]+"/);
+                        n = substr($0, RSTART+1, RLENGTH-2);
+                        short = n; sub(/^[^.]+\./, "", short);
+                        started[short] = n; next
+                    }
+                    /finished item .* TABLE DATA / {
+                        short = $NF; delete started[short]; next
+                    }
+                    END {
+                        sep = "";
+                        for (k in started) { printf "%s%s", sep, started[k]; sep = ", " }
+                    }
+                ' "$pg_dump_log")
+            fi
+            [[ -z "$in_flight" ]] && in_flight="(none — schema or finalize phase)"
+
+            local clock; clock=$(date '+%H:%M:%S')
+            printf "  %s◐%s %s%s%s elapsed %ds · size %s (%s KB/s) · procs %s · dumping: %s\n" \
+                "$C_BLUE" "$C_RESET" "$C_DIM" "$clock" "$C_RESET" \
+                "$elapsed" "${sz_h:-0}" "${throughput:-0}" "${workers:-?}" "$in_flight" >> "$heartbeat_out"
+        done
+    ) &
+    local heartbeat_pid=$!
+    trap 'kill '"$heartbeat_pid"' 2>/dev/null || true' RETURN
+
+    local conninfo; conninfo=$(make_conninfo "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_DB")
+    local dump_rc=0
+    set +e
+    PGPASSWORD="$REMOTE_PASS" \
+    PGOPTIONS="-c statement_timeout=0 -c idle_in_transaction_session_timeout=0" \
+    pg_dump \
+        -d "$conninfo" \
+        -Fd \
+        -j "$JOBS" \
+        -Z "$COMPRESSION_LEVEL" \
+        -f "$DUMP_DIR" \
+        -b \
+        --no-owner \
+        --no-privileges \
+        --exclude-schema=rdsadmin \
+        ${INCLUDE_ARGS[@]+"${INCLUDE_ARGS[@]}"} \
+        ${EXCLUDE_ARGS[@]+"${EXCLUDE_ARGS[@]}"} \
+        --verbose \
+        --no-sync 2>&1 | tee -a "$pg_dump_log"
+    dump_rc=${PIPESTATUS[0]}
+    set -e
+
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    trap - RETURN
+
+    if (( dump_rc != 0 )); then
+        log_error "pg_dump failed with code $dump_rc."
+        log_error "Verbose log retained at: $pg_dump_log"
+        exit "$dump_rc"
+    fi
+
+    log_ok "Dump completed."
+    log_info "Dump size: $(du -sh "$DUMP_DIR" | awk '{print $1}')"
+    verify_excluded_in_dump
+}
+
+verify_excluded_in_dump() {
+    (( ${#EXCLUDE_TABLE_DATA[@]} == 0 )) && return 0
+    log_info "Verifying excluded tables have no TABLE DATA entries…"
+    local listing
+    listing=$(pg_restore -l "$DUMP_DIR" 2>/dev/null) || {
+        log_warn "Could not read dump TOC."; return 0
+    }
+    local t short re
+    for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+        short="${t##*.}"
+        re=$(glob_to_ere "$short")
+        if grep -E "TABLE DATA.*[[:space:]]${re}([[:space:]]|$)" <<< "$listing" >/dev/null; then
+            log_warn " $t — TABLE DATA entry FOUND (excludes may not have applied)"
+        else
+            log_ok " $t — excluded"
+        fi
+    done
+}
+
+# ============================================================================
+# Restore: dump discovery, local DB prep, do_restore
+# ============================================================================
+discover_local_dumps() {
+    log_step "Choose dump to restore"
+    local dumps=() entry size mtime age path
+    if [[ -d "$DUMP_BASE_DIR" ]]; then
+        while IFS= read -r entry; do
+            [[ -d "$entry/" ]] || continue
+            dumps+=("$entry")
+        done < <(find "$DUMP_BASE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    fi
+
+    while true; do
+        if (( ${#dumps[@]} == 0 )); then
+            log_warn "No dumps found in $DUMP_BASE_DIR."
+            path=$(ask "Paste absolute path to dump directory (or 'q' to quit):")
+        else
+            log_info "Found ${#dumps[@]} dump(s) in $DUMP_BASE_DIR:"
+            local i
+            for (( i=0; i<${#dumps[@]}; i++ )); do
+                path="${dumps[i]}"
+                size=$(du -sh "$path" 2>/dev/null | awk '{print $1}')
+                if [[ "$(uname)" == "Darwin" ]]; then
+                    mtime=$(stat -f '%m' "$path" 2>/dev/null)
+                else
+                    mtime=$(stat -c '%Y' "$path" 2>/dev/null)
+                fi
+                local now=$(( $(date +%s) ))
+                local secs=$(( now - ${mtime:-$now} ))
+                if (( secs < 60 )); then age="${secs}s ago"
+                elif (( secs < 3600 )); then age="$((secs/60))m ago"
+                elif (( secs < 86400 )); then age="$((secs/3600))h ago"
+                else age="$((secs/86400))d ago"
+                fi
+                printf ' %s%3d)%s %-50s %10s %s\n' "$C_BOLD" "$((i+1))" "$C_RESET" "$path" "$size" "$age"
+            done
+            printf ' %s%3s)%s Paste a custom path\n' "$C_BOLD" "P" "$C_RESET"
+            printf ' %s%3s)%s Quit\n' "$C_BOLD" "Q" "$C_RESET"
+
+            local raw
+            while true; do
+                _prompt_label "Choose [1-${#dumps[@]}, P, or Q]:"
+                read -r raw
+                raw="${raw// /}"
+                if [[ "$raw" == "P" || "$raw" == "p" ]]; then
+                    path=$(ask "Paste absolute path to dump directory:")
+                    break
+                elif [[ "$raw" == "Q" || "$raw" == "q" ]]; then
+                    log_info "Goodbye."
+                    exit 0
+                elif [[ "$raw" =~ ^[0-9]+$ ]] && (( raw >= 1 && raw <= ${#dumps[@]} )); then
+                    path="${dumps[raw-1]}"
+                    break
+                fi
+                log_warn "Invalid selection."
+            done
+        fi
+
+        # Allow 'q' to quit when prompted for a custom path too.
+        if [[ "$path" == "q" || "$path" == "Q" ]]; then
+            log_info "Goodbye."
+            exit 0
+        fi
+
+        if [[ -d "$path" ]] && [[ -f "$path/toc.dat" ]]; then
+            DUMP_DIR="$path"
+            log_ok "Selected dump: $DUMP_DIR"
+            return 0
+        fi
+
+        log_error "Not a valid pg_dump directory dump: $path (missing toc.dat)"
+        log_info "Returning to dump selection…"
+        echo
+    done
+}
+
+# Choose between clean, backfill, per-table restore modes.
+choose_restore_mode() {
+    log_step "Restore mode"
+    echo " ${C_BOLD}1) Clean restore${C_RESET} DROP local DB '$LOCAL_DB', recreate, restore everything"
+    echo " ${C_BOLD}2) Backfill only${C_RESET} keep local DB, restore on top (skips conflicts)"
+    echo " ${C_BOLD}3) Per-table restore${C_RESET} pick specific tables (data-only or full)"
+    local choice
+    choice=$(ask_choice "Choose" 1 3 1)
+    case "$choice" in
+        1) RESTORE_MODE="clean" ;;
+        2) RESTORE_MODE="backfill" ;;
+        3) RESTORE_MODE="per-table"; choose_per_table_restore ;;
+    esac
+    log_ok "Restore mode: ${C_BOLD}$RESTORE_MODE${C_RESET}${RESTORE_TABLE_MODE:+ (${RESTORE_TABLE_MODE})}"
+}
+
+# List tables that exist IN THE DUMP (not the DB) via pg_restore -l.
+list_tables_in_dump() {
+    pg_restore -l "$DUMP_DIR" 2>/dev/null \
+        | awk '/TABLE DATA / {
+            # format: ; <id> <id> TABLE DATA <schema> <table> <owner>
+            print $(NF-2) "." $(NF-1)
+          }' \
+        | sort -u
+}
+
+choose_per_table_restore() {
+    echo
+    log_step "Per-table restore — what to restore?"
+    echo " ${C_BOLD}1)${C_RESET} Schema + data ${C_DIM}(table is dropped+recreated if exists)${C_RESET}"
+    echo " ${C_BOLD}2)${C_RESET} Data only ${C_DIM}(schema must already exist locally)${C_RESET}"
+    local tm
+    tm=$(ask_choice "Choose" 1 2 2)
+    RESTORE_TABLE_MODE=$([[ "$tm" == "1" ]] && echo "full" || echo "data-only")
+
+    log_info "Reading table list from dump…"
+    local tables=()
+    while IFS= read -r t; do tables+=("$t"); done < <(list_tables_in_dump)
+    if (( ${#tables[@]} == 0 )); then
+        log_error "No tables found in dump TOC."
+        exit 1
+    fi
+    log_info "Tables in dump (${#tables[@]}):"
+    local i
+    for (( i=0; i<${#tables[@]}; i++ )); do
+        printf ' %s%3d)%s %s\n' "$C_BOLD" "$((i+1))" "$C_RESET" "${tables[i]}"
+    done | paginate 30
+    echo
+    while true; do
+        log_info "Enter numbers and/or ranges (e.g. 1,3,5-8), 'all' for everything, or 'q' to quit."
+        local raw
+        _prompt_label "Pick:"
+        read -r raw
+        raw="${raw// /}"
+
+        if [[ "$raw" == "q" || "$raw" == "Q" ]]; then
+            log_info "Goodbye."
+            exit 0
+        fi
+
+        RESTORE_TABLES=()
+        if [[ "$raw" == "all" || -z "$raw" ]]; then
+            RESTORE_TABLES=("${tables[@]}")
+        else
+            local IFS=','
+            for part in $raw; do
+                if [[ "$part" == *-* ]]; then
+                    local lo="${part%-*}" hi="${part#*-}"
+                    if [[ "$lo" =~ ^[0-9]+$ && "$hi" =~ ^[0-9]+$ ]]; then
+                        local n
+                        for (( n=lo; n<=hi; n++ )); do
+                            (( n >= 1 && n <= ${#tables[@]} )) && RESTORE_TABLES+=("${tables[n-1]}")
+                        done
+                    fi
+                elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                    (( part >= 1 && part <= ${#tables[@]} )) && RESTORE_TABLES+=("${tables[part-1]}")
+                fi
+            done
+        fi
+
+        if (( ${#RESTORE_TABLES[@]} > 0 )); then
+            break
+        fi
+        log_warn "No valid tables selected. Try again or type 'q' to quit."
+    done
+    log_ok "Will restore ${#RESTORE_TABLES[@]} table(s):"
+    local t
+    for t in "${RESTORE_TABLES[@]}"; do echo " - $t"; done
+}
+
+prep_local_db() {
+    log_step "Preparing local database"
+    export PGPASSWORD="$LOCAL_PASS"
+
+    if [[ "$RESTORE_MODE" == "clean" ]]; then
+        log_warn "About to ${C_BOLD}DROP${C_RESET} local database '$LOCAL_DB' and recreate it."
+        confirm "${C_BOLD}${C_RED}Drop and recreate '$LOCAL_DB'?${C_RESET}" y \
+            || { log_error "Aborted by user."; exit 1; }
+        if (( DRY_RUN )); then
+            log_warn "DRY RUN: would DROP/CREATE database '$LOCAL_DB' here."
+            return 0
+        fi
+        log_info "Terminating active connections to '$LOCAL_DB'…"
+        psql_local -d postgres -c "
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = '$(sql_escape "$LOCAL_DB")' AND pid <> pg_backend_pid();
+        " >/dev/null || true
+        psql_local -d postgres -c "DROP DATABASE IF EXISTS \"$LOCAL_DB\";"
+        psql_local -d postgres -c "CREATE DATABASE \"$LOCAL_DB\" OWNER \"$LOCAL_USER\";"
+        log_ok "Clean local database ready."
+    else
+        log_info "$RESTORE_MODE mode — keeping existing local DB '$LOCAL_DB'."
+        if ! psql_local -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$(sql_escape "$LOCAL_DB")';" | grep -q 1; then
+            log_warn "'$LOCAL_DB' does not exist."
+            confirm "Create it?" y || { log_error "Cannot restore into missing DB."; exit 1; }
+            (( DRY_RUN )) || psql_local -d postgres -c "CREATE DATABASE \"$LOCAL_DB\" OWNER \"$LOCAL_USER\";"
+            log_ok "Created '$LOCAL_DB'."
+        fi
+    fi
+}
+
+do_restore() {
+    log_step "Restoring into local database"
+    log_info "Target: $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT/$LOCAL_DB"
+    log_info "Mode: $RESTORE_MODE${RESTORE_TABLE_MODE:+ (${RESTORE_TABLE_MODE})}"
+
+    confirm "${C_BOLD}${C_YELLOW}Start restoring now?${C_RESET}" y \
+        || { log_error "Aborted by user."; exit 1; }
+
+    if (( DRY_RUN )); then
+        log_warn "DRY RUN: skipping pg_restore."
+        return 0
+    fi
+
+    export PGPASSWORD="$LOCAL_PASS"
+    local extra_args=()
+    case "$RESTORE_MODE" in
+        backfill)
+            extra_args+=(--data-only)
+            log_info "Backfill: --data-only so existing schema is preserved."
+            log_warn "Rows conflicting with existing PKs will be skipped."
+            ;;
+        per-table)
+            local t
+            for t in "${RESTORE_TABLES[@]}"; do
+                # pg_restore --table accepts bare name; strip schema prefix if any
+                extra_args+=(--table="${t##*.}")
+            done
+            [[ "$RESTORE_TABLE_MODE" == "data-only" ]] && extra_args+=(--data-only)
+            ;;
+    esac
+
+    local rc=0
+    set +e
+    pg_restore \
+        -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -d "$LOCAL_DB" \
+        -j "$JOBS" \
+        --no-owner \
+        --no-privileges \
+        --disable-triggers \
+        ${extra_args[@]+"${extra_args[@]}"} \
+        --verbose \
+        "$DUMP_DIR" 2>&1
+    rc=$?
+    set -e
+
+    if [[ "$RESTORE_MODE" == "backfill" ]]; then
+        if (( rc != 0 )); then
+            log_warn "pg_restore exit $rc — expected in backfill mode (conflicts are normal)."
+        else
+            log_ok "Backfill restore complete."
+        fi
+    else
+        (( rc == 0 )) && log_ok "Restore complete." || { log_error "pg_restore failed ($rc)."; exit "$rc"; }
+    fi
+}
+
+# ============================================================================
+# Post-restore: ANALYZE + stats + fsync safety check
+# ============================================================================
+post_restore() {
+    log_step "Post-restore tasks"
+
+    if confirm "Run ANALYZE on local DB to refresh planner stats?" y; then
+        (( DRY_RUN )) || PGPASSWORD="$LOCAL_PASS" psql -h "$LOCAL_HOST" -p "$LOCAL_PORT" \
+            -U "$LOCAL_USER" -d "$LOCAL_DB" -c "ANALYZE;" >/dev/null
+        log_ok "ANALYZE done."
+    fi
+
+    log_info "Fetching post-restore table stats…"
+    local stats
+    if (( DRY_RUN )); then
+        log_warn "DRY RUN: skipping stats query."
+    else
+        stats=$(fetch_table_stats "target" 2>/dev/null) || true
+        render_stats "Target DB: table stats after restore" "$stats"
+    fi
+
+    detect_dangerous_pg_settings
+}
+
+detect_dangerous_pg_settings() {
+    # Best-effort detection of fsync=off etc. on the LOCAL Postgres.
+    # We query SHOW values (live values, not just the file). If any look risky,
+    # warn the user and offer guidance.
+    local out
+    if ! out=$(psql_local -d postgres -tA -F '|' <<'SQL' 2>/dev/null
+SELECT name, setting
+FROM pg_settings
+WHERE name IN ('fsync', 'full_page_writes', 'synchronous_commit', 'wal_level');
+SQL
+    ); then
+        return 0
+    fi
+
+    local risky=()
+    while IFS='|' read -r name val; do
+        case "$name" in
+            fsync) [[ "$val" == "off" ]] && risky+=("fsync=off") ;;
+            full_page_writes) [[ "$val" == "off" ]] && risky+=("full_page_writes=off") ;;
+            synchronous_commit) [[ "$val" == "off" ]] && risky+=("synchronous_commit=off") ;;
+            wal_level) [[ "$val" == "minimal" ]] && risky+=("wal_level=minimal") ;;
+        esac
+    done <<< "$out"
+
+    if (( ${#risky[@]} > 0 )); then
+        echo
+        log_warn "Detected danger-zone postgresql.conf settings on local DB:"
+        local s
+        for s in "${risky[@]}"; do echo " ${C_YELLOW}- $s${C_RESET}"; done
+        log_warn "These are great for fast restore but unsafe for normal use."
+        log_warn "Revert them in your postgresql.conf and restart Postgres:"
+        log_warn " brew services restart postgresql@16"
+    fi
+}
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+cleanup_dump() {
+    [[ "$MODE" == "restore-only" ]] && return 0
+    log_step "Dump cleanup"
+    log_info "Dump on disk: $DUMP_DIR ($(du -sh "$DUMP_DIR" 2>/dev/null | awk '{print $1}'))"
+    if confirm "Delete dump directory to free space?" n; then
+        rm -rf "$DUMP_DIR"
+        [[ -f "${DUMP_DIR}.pg_dump.log" ]] && rm -f "${DUMP_DIR}.pg_dump.log"
+        log_ok "Dump deleted."
+    else
+        log_info "Dump kept — re-usable in restore-only mode without re-dumping."
+        [[ -f "${DUMP_DIR}.pg_dump.log" ]] && rm -f "${DUMP_DIR}.pg_dump.log" \
+            && log_info "Verbose log removed."
+    fi
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+main() {
+    parse_cli_args "$@"
+    if (( SHOW_HELP )); then print_help; exit 0; fi
+    if (( SHOW_VERSION )); then print_version; exit 0; fi
+
+    choose_mode
+    preflight
+
+    case "$MODE" in
+        full-sync)
+            gather_remote_credentials
+            gather_local_credentials
+            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB}_dump"
+            log_info "Dump will land in: ${C_BOLD}$DUMP_DIR${C_RESET}"
+
+            test_source_connection
+            choose_include_tables
+            gather_exclusions
+            build_dump_args
+
+            log_info "Fetching source table stats (this may take a moment)…"
+            local src_stats
+            src_stats=$(fetch_table_stats "source" 2>/dev/null) || true
+            render_stats "Source DB: table stats before dump" "$src_stats"
+
+            test_source_and_estimate_size
+            detect_jobs
+            choose_compression
+            choose_restore_mode
+            show_plan_and_confirm
+
+            do_dump
+            prep_local_db
+            do_restore
+            post_restore
+            cleanup_dump
+            ;;
+        dump-only)
+            gather_remote_credentials
+            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB}_dump"
+            log_info "Dump will land in: ${C_BOLD}$DUMP_DIR${C_RESET}"
+
+            test_source_connection
+            choose_include_tables
+            gather_exclusions
+            build_dump_args
+
+            log_info "Fetching source table stats…"
+            local src_stats
+            src_stats=$(fetch_table_stats "source" 2>/dev/null) || true
+            render_stats "Source DB: table stats before dump" "$src_stats"
+
+            test_source_and_estimate_size
+            detect_jobs
+            choose_compression
+            show_plan_and_confirm
+
+            do_dump
+            log_ok "Dump-only complete. Dump at: $DUMP_DIR"
+            ;;
+        restore-only)
+            discover_local_dumps
+            gather_local_credentials
+            detect_jobs
+            choose_restore_mode
+            show_plan_and_confirm
+            prep_local_db
+            do_restore
+            post_restore
+            ;;
+    esac
+
+    banner "All done ✔"
+    if [[ "$MODE" != "dump-only" ]]; then
+        log_ok "Local DB ready: $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT/$LOCAL_DB"
+        log_info "Connect: psql -h $LOCAL_HOST -p $LOCAL_PORT -U $LOCAL_USER -d $LOCAL_DB"
+    fi
+}
+
+# Robust trap: SIGINT / SIGTERM / unexpected EXIT cleans up background jobs.
+on_exit() {
+    local rc=$?
+    # Kill any lingering background children (heartbeat, etc.)
+    jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
+    exit "$rc"
+}
+trap on_exit EXIT
+trap 'log_error "Script interrupted."; exit 130' INT TERM
+
+main "$@"
