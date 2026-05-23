@@ -146,7 +146,7 @@ The full end-to-end runbook lives in [`RELEASING.md`](RELEASING.md). In short:
 1. Update `SCRIPT_VERSION` in `src/pg-sync` and add a `CHANGELOG.md` entry.
 2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`
 3. CI builds the artifacts and creates the GitHub Release.
-4. Manually update the Homebrew tap formula with the new sha256.
+4. `make publish-tap` to push the formula to the Homebrew tap.
 
 ## Contributing
 

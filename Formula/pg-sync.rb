@@ -16,7 +16,7 @@ class PgSync < Formula
   homepage "https://github.com/nixrajput/pg-sync"
   url "https://github.com/nixrajput/pg-sync/releases/download/v1.0.0/pg-sync-1.0.0.tar.gz"
   version "1.0.0"
-  sha256 "REPLACE_WITH_RELEASE_SHA256"
+  sha256 "49f30267d468d62bca73b64d17a9db5d87f9ff92e422dce3c535d6a51bb8e6fa"
   license "MIT"
 
   depends_on "bash"

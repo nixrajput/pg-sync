@@ -1,7 +1,7 @@
 # pg-sync — developer Makefile
 # All targets are phony; this is a convenience wrapper, not a build dependency graph.
 
-.PHONY: help lint test build install uninstall clean release-check
+.PHONY: help lint test build install uninstall clean release-check publish-tap
 
 SHELL := /usr/bin/env bash
 SCRIPT := src/pg-sync
@@ -64,3 +64,6 @@ release-check:  ## Verify the working tree is clean and CHANGELOG has an entry f
 	@git diff --quiet --exit-code || { echo "Working tree dirty — commit first"; exit 1; }
 	@grep -q "^## \[$(VERSION)\]" CHANGELOG.md || { echo "CHANGELOG.md has no entry for $(VERSION)"; exit 1; }
 	@echo "==> Ready to tag v$(VERSION) (run: git tag -a v$(VERSION) -m \"v$(VERSION)\" && git push origin v$(VERSION))"
+
+publish-tap:  ## Publish the current release to the Homebrew tap (after GitHub release exists)
+	@bash scripts/publish-tap.sh

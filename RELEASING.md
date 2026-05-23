@@ -45,7 +45,7 @@ If you don't have `gh`, you can do the release manually via the web UI — the r
                        (automated)
 ```
 
-Steps 1–4 are manual. Step 5 is automated by GitHub Actions. Step 6 is manual today; we may automate it later.
+Steps 1–4 are manual. Step 5 is automated by GitHub Actions. Step 6 is one command (`make publish-tap`) which wraps `scripts/publish-tap.sh`.
 
 ---
 
@@ -174,51 +174,60 @@ The workflow does:
 
 ---
 
-## Step 6 — Update the Homebrew tap (manual)
+## Step 6 — Update the Homebrew tap
 
 After the GitHub Release exists, users on Homebrew won't see the new version until you update the tap formula.
 
-### 6a. Compute the new sha256
-
-The CI uploaded `pg-sync-${VERSION}.tar.gz.sha256` to the release. Grab it:
+### 6a. Run the automation (recommended)
 
 ```bash
-gh release view v1.1.0 --json assets --jq '.assets[].url'
-# or visually from https://github.com/nixrajput/pg-sync/releases/tag/v1.1.0
+make publish-tap
 ```
 
-Or recompute locally:
+That single command:
+
+1. Downloads the released tarball from GitHub.
+2. Computes its sha256 (authoritative — uses what GitHub serves).
+3. Updates `Formula/pg-sync.rb` in this repo with new url/version/sha256.
+4. Clones or pulls the tap repo (`nixrajput/homebrew-pg-sync`) into a sibling directory.
+5. Copies the updated formula into the tap repo.
+6. Commits with a `.gitmessage`-compliant message and pushes to `origin/main`.
+
+The script is **idempotent**: re-running for the same version is a no-op.
+
+If you want to preview without writing anything:
 
 ```bash
-shasum -a 256 dist/pg-sync-1.1.0.tar.gz
+bash scripts/publish-tap.sh --dry-run
 ```
 
-### 6b. Update `Formula/pg-sync.rb`
+### 6b. Manual fallback
 
-Two fields change every release: `url` and `sha256`. The `version` field is extracted from the URL by Homebrew but we keep it explicit for clarity.
+If the automation fails or you prefer to do it by hand, the steps are:
 
-```ruby
-url "https://github.com/nixrajput/pg-sync/releases/download/v1.1.0/pg-sync-1.1.0.tar.gz"
-version "1.1.0"
-sha256 "abc123…"   # paste the sha256 here
-```
+1. Compute the sha256 from the release asset:
 
-### 6c. Push the formula to the tap repo
+   ```bash
+   curl -fsSL https://github.com/nixrajput/pg-sync/releases/download/v1.1.0/pg-sync-1.1.0.tar.gz \
+       | shasum -a 256
+   ```
 
-The formula in _this_ repo (`Formula/pg-sync.rb`) is the master copy. The **tap repo** (`nixrajput/homebrew-pg-sync`) is what users install from. Copy the updated formula across:
+2. Update `Formula/pg-sync.rb` in this repo — change `url`, `version`, and `sha256`.
+
+3. Copy to the tap repo and push:
+
+   ```bash
+   cd /path/to/homebrew-pg-sync
+   cp /path/to/pg-sync/Formula/pg-sync.rb Formula/pg-sync.rb
+   git add Formula/pg-sync.rb
+   git commit -m "chore: bump pg-sync to v1.1.0"
+   git push origin main
+   ```
+
+### 6c. Smoke-test the install
 
 ```bash
-# In a sibling clone of the tap repo
-cp ../pg-sync/Formula/pg-sync.rb Formula/pg-sync.rb
-git add Formula/pg-sync.rb
-git commit -m "pg-sync 1.1.0"
-git push origin main
-```
-
-### 6d. Smoke-test the install
-
-```bash
-brew untap nixrajput/pg-sync 2>/dev/null  # if previously tapped
+brew untap nixrajput/pg-sync 2>/dev/null || true
 brew tap nixrajput/pg-sync
 brew install pg-sync
 pg-sync --version
@@ -280,8 +289,14 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 
 # 4. Wait for CI: https://github.com/nixrajput/pg-sync/actions
-# 5. Update Homebrew tap with new url + sha256
-# 6. brew install pg-sync && pg-sync --version
+# 5. Publish to Homebrew tap
+make publish-tap
+
+# 6. Smoke-test the install
+brew untap nixrajput/pg-sync 2>/dev/null || true
+brew tap nixrajput/pg-sync
+brew install pg-sync
+pg-sync --version
 ```
 
 ---
