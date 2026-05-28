@@ -8,39 +8,23 @@ March 2026
 
 > These apply to EVERY interaction, automatically.
 
-### Core Principles
+### Working Discipline
 
-- **Context first**: Read existing code completely before modifying. Understand patterns before proposing changes.
-- **Plan before execution**: Break complex tasks into steps. Explain approach. Get approval for significant changes.
-- **Incremental implementation**: Implement one step at a time. Verify before proceeding. Run tests after each change.
-- **Clear communication**: Ask clarifying questions when requirements are unclear. Report what was done and why.
+> Behavioral guidelines to reduce common LLM coding mistakes. Bias toward caution over speed; for trivial tasks, use judgment.
 
-### Multi-Agent Safety Rules
-
-- **Never** create/apply/drop git stash entries unless explicitly requested
-- **Never** edit files in `node_modules/`, `vendor/`, or other dependency directories
-- **Always** work on a dedicated branch when running concurrent agents
-- **Never** force-push or rebase shared branches from an agent session
-- **Verify** no other agent is modifying the same files before making changes
-
----
-
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-## 1. Think Before Coding
+#### 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
 
+- Read existing code and understand patterns before proposing changes.
 - State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
+- If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
-## 2. Simplicity First
+#### 2. Simplicity First
 
 **Minimum code that solves the problem. Nothing speculative.**
 
@@ -52,7 +36,7 @@ Before implementing:
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+#### 3. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
 
@@ -61,7 +45,7 @@ When editing existing code:
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
 - Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+- If you notice unrelated dead code, mention it — don't delete it.
 
 When your changes create orphans:
 
@@ -70,7 +54,7 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+#### 4. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 
@@ -90,6 +74,20 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+#### 5. Report What Was Done
+
+After completing work, state what changed and why — not just that it's done.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+### Multi-Agent Safety Rules
+
+- **Never** create/apply/drop git stash entries unless explicitly requested
+- **Never** edit files in `node_modules/`, `vendor/`, or other dependency directories
+- **Always** work on a dedicated branch when running concurrent agents
+- **Never** force-push or rebase shared branches from an agent session
+- **Verify** no other agent is modifying the same files before making changes
+
+---
