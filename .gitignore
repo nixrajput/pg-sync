@@ -22,3 +22,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Superpowers brainstorming session artifacts
+.superpowers/
