@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        env:
+          SHELLCHECK_OPTS: -e SC1090 -e SC1091
+      - name: Make check (if a check/test target exists)
+        run: |
+          if [ -f Makefile ] && grep -qE '^(check|test):' Makefile; then
+            make check 2>/dev/null || make test
+          else
+            echo "no Makefile check/test target — shellcheck only"
+          fi
