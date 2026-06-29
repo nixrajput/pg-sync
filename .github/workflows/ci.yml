@@ -23,6 +23,8 @@ jobs:
           persist-credentials: false
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning # match the repo's `make lint` convention
         env:
           SHELLCHECK_OPTS: -e SC1090 -e SC1091
       - name: Make check (if a check/test target exists)
