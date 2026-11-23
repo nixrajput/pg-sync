@@ -29,7 +29,7 @@ umask 077 # dumps and logs hold copied database data: keep them owner-only
 # Constants
 # ============================================================================
 readonly SCRIPT_NAME="pg-sync"
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 
 DUMP_BASE_DIR="${PG_SYNC_DUMP_DIR:-$HOME/pg_dumps}"

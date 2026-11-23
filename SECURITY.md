@@ -4,13 +4,14 @@ We take the security of `pg-sync` seriously. This document explains how to repor
 
 ## Supported versions
 
-`pg-sync` is in its initial release. Security fixes target the latest released version only:
+Security fixes target **the two most recent minor lines**:
 
-| Version | Supported |
-| ------- | --------- |
-| 1.0.x   | ✅ Latest |
+| Version | Supported           |
+| ------- | ------------------- |
+| 1.1.x   | ✅ Latest           |
+| 1.0.x   | ✅ Security fixes   |
 
-Once we have multiple minor releases, this policy will widen to **the two most recent minor lines** — for example, when `1.2.0` ships, both `1.2.x` and `1.1.x` will receive fixes; `1.0.x` will be unsupported.
+When `1.2.0` ships, `1.2.x` and `1.1.x` receive fixes and `1.0.x` becomes unsupported.
 
 If you are on an older release than the latest, please upgrade first — the issue may already be fixed.
 
@@ -51,7 +52,10 @@ The following are NOT considered vulnerabilities in `pg-sync`:
 
 - Passwords are read with `read -s` (no terminal echo, no shell history).
 - `PGPASSWORD` is set per-command via env vars, never written to disk.
-- All SQL interpolation of user input goes through a `sql_escape` helper.
+- All SQL interpolation of user input goes through the `sql_escape` (values) and `sql_ident` (names) helpers.
+- Connection strings quote every value, and source sessions run with `default_transaction_read_only=on`.
+- TLS and auth parameters in a pasted URL (for example `sslmode=verify-full`) reach libpq. Passwords never go on a command line.
+- Dumps, logs and new dump directories are created owner-only (`umask 077`).
 - Checksums are published with every release and verified by the installer.
 - `set -euo pipefail` is on at script-level to fail fast on unexpected errors.
 

@@ -27,7 +27,7 @@
 - **Three modes**: full sync, dump-only, restore-only — chosen from a menu.
 - **Smart table selection**: pick from a numbered list, type wildcards, or exclude specific tables' data.
 - **Live progress**: heartbeat every 10 seconds shows throughput and which tables are currently being dumped.
-- **Connection URLs**: paste `postgres://user:pass@host:5432/dbname` instead of entering five fields one by one.
+- **Connection URLs**: paste `postgres://user:pass@host:5432/dbname` instead of entering five fields one by one. TLS and auth parameters in the URL, such as `?sslmode=verify-full`, apply to every source connection.
 - **Restore-only mode**: pick from previously-saved dumps, restore individual tables or all of them, with schema+data or data-only modes.
 - **Pre/post stats**: per-table row counts and sizes before dump and after restore, paginated for large schemas.
 - **Safety**: never writes to the source database, warns about dangerous `postgresql.conf` settings on the target, supports `--dry-run`.
@@ -143,7 +143,7 @@ The source of truth is `src/pg-sync`. The `bin/` and `dist/` directories are gen
 
 The full end-to-end runbook lives in [`RELEASING.md`](RELEASING.md). In short:
 
-1. Update `SCRIPT_VERSION` in `src/pg-sync` and add a `CHANGELOG.md` entry.
+1. Update `SCRIPT_VERSION` in `src/pg-sync` and the root `VERSION` file to the same value, and add a `CHANGELOG.md` entry.
 2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`
 3. CI builds the artifacts and creates the GitHub Release.
 4. `make publish-tap` to push the formula to the Homebrew tap.

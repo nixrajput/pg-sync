@@ -51,7 +51,7 @@ Steps 1–4 are manual. Step 5 is automated by GitHub Actions. Step 6 is one com
 
 ## Step 1 — Bump the version
 
-The script's version lives in **one place**: `src/pg-sync`, line ~36, in the constant `SCRIPT_VERSION`.
+The script's version lives in `src/pg-sync`, line ~36, in the constant `SCRIPT_VERSION`. The root `VERSION` file holds the same value, because the `version bumped` PR check reads it.
 
 ```bash
 # Find it and edit:
@@ -64,7 +64,7 @@ Update it to the new version (without the leading `v`):
 readonly SCRIPT_VERSION="1.1.0"
 ```
 
-The `Makefile`, `scripts/build.sh`, and CI all extract the version from this single line via `sed`. Do **not** hard-code the version anywhere else.
+The `Makefile`, `scripts/build.sh`, and the release workflow extract the version from this line via `sed`. Set `VERSION` to the same value. Do **not** hard-code the version anywhere else.
 
 > **Why a single source of truth?** When CI builds the tarball, it names the
 > file `pg-sync-${VERSION}.tar.gz`. Any drift between what the script reports
@@ -274,7 +274,7 @@ For an experienced maintainer cutting a routine release:
 
 ```bash
 # 1. Bump
-$EDITOR src/pg-sync                # update SCRIPT_VERSION
+$EDITOR src/pg-sync VERSION        # update SCRIPT_VERSION and VERSION
 $EDITOR CHANGELOG.md               # move [Unreleased] to [X.Y.Z]
 
 # 2. Verify
