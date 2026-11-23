@@ -11,8 +11,8 @@
 # • Pre-dump and post-restore stats (size + row count, paginated)
 # • Detects and warns about dangerous postgresql.conf settings
 #
-# Source: https://github.com/<your-username>/pg-sync (edit before publish)
-# License: MIT (edit before publish)
+# Source: https://github.com/nixrajput/pg-sync
+# License: MIT
 #
 # Usage:
 # ./sync_rds_to_local.sh # interactive
@@ -23,12 +23,13 @@
 
 set -euo pipefail
 IFS=$' \t\n'
+umask 077 # dumps and logs hold copied database data: keep them owner-only
 
 # ============================================================================
 # Constants
 # ============================================================================
 readonly SCRIPT_NAME="pg-sync"
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 
 DUMP_BASE_DIR="${PG_SYNC_DUMP_DIR:-$HOME/pg_dumps}"
@@ -39,6 +40,7 @@ SHOW_VERSION=0
 # Runtime state — populated by user input
 MODE="" # full-sync | dump-only | restore-only
 REMOTE_HOST="" REMOTE_PORT="" REMOTE_USER="" REMOTE_PASS="" REMOTE_DB=""
+REMOTE_PARAMS="" # TLS/auth parameters from a pasted URL, as quoted conninfo pairs
 LOCAL_HOST="" LOCAL_PORT="" LOCAL_USER="" LOCAL_PASS="" LOCAL_DB=""
 DUMP_DIR=""
 INCLUDE_TABLE_DATA=() # empty = all tables; otherwise --table=... allow-list
@@ -272,6 +274,8 @@ parse_remote_url() {
         return 1
     fi
 
+    local query=""
+    [[ "$rest" == *\?* ]] && query="${rest#*\?}"
     rest="${rest%%\?*}" # strip query string
 
     if [[ "$rest" != *@* ]]; then
@@ -316,6 +320,21 @@ parse_remote_url() {
     REMOTE_USER="$(url_decode "$raw_user")"
     REMOTE_PASS="$(url_decode "$raw_pass")"
     REMOTE_DB="$(url_decode "$raw_db")"
+
+    # Keep TLS and auth settings (e.g. sslmode=verify-full). Other parameters (Prisma's schema=, etc.)
+    # are not libpq options. Passwords never go into conninfo: it is visible in `ps`.
+    REMOTE_PARAMS=""
+    local pairs=() pair key val
+    [[ -n "$query" ]] && IFS='&' read -ra pairs <<< "$query"
+    for pair in ${pairs[@]+"${pairs[@]}"}; do
+        key="$(url_decode "${pair%%=*}")" val="$(url_decode "${pair#*=}")"
+        [[ "$key" == "ssl" && "$val" == "true" ]] && key="sslmode" val="require" # libpq's JDBC alias
+        if [[ "$pair" == *=* && "$key" =~ ^(ssl[a-z_]+|channel_binding|gssencmode|require_auth)$ && "$key" != "sslpassword" ]]; then
+            REMOTE_PARAMS+=" $key=$(conninfo_quote "$val")"
+        else
+            log_warn "Ignoring URL parameter '$key' (only TLS and auth parameters apply)."
+        fi
+    done
     return 0
 }
 
@@ -323,20 +342,20 @@ parse_remote_url() {
 # Misc helpers
 # ============================================================================
 
-# Build a conninfo string with libpq keepalives (so long COPYs survive NAT
-# eviction). Echoes the string; caller assigns it.
+# Build the source conninfo string with libpq keepalives (so long COPYs survive NAT
+# eviction) and the URL's TLS/auth parameters. Echoes the string; caller assigns it.
 make_conninfo() {
     local host="$1" port="$2" user="$3" db="$4"
-    printf 'host=%s port=%s user=%s dbname=%s ' "$host" "$port" "$user" "$db"
+    printf 'host=%s port=%s user=%s dbname=%s ' "$(conninfo_quote "$host")" "$(conninfo_quote "$port")" \
+        "$(conninfo_quote "$user")" "$(conninfo_quote "$db")"
     printf 'keepalives=1 keepalives_idle=60 keepalives_interval=15 keepalives_count=10 '
-    printf 'connect_timeout=30'
+    printf 'connect_timeout=30%s' "$REMOTE_PARAMS"
 }
 
 # Run psql against the source with the standard env + options.
 psql_source() {
-    PGPASSWORD="$REMOTE_PASS" psql \
-        -h "$REMOTE_HOST" -p "$REMOTE_PORT" \
-        -U "$REMOTE_USER" -d "$REMOTE_DB" \
+    PGPASSWORD="$REMOTE_PASS" PGOPTIONS="-c default_transaction_read_only=on" psql \
+        -d "$(make_conninfo "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_DB")" \
         -v ON_ERROR_STOP=1 "$@"
 }
 
@@ -384,8 +403,22 @@ glob_to_ere() {
 }
 
 # Escape a single value for safe inclusion in a SQL literal (doubles single quotes).
+# Bash 3.2 keeps backslashes from an inline replacement like \'\', so the quotes come from variables.
 sql_escape() {
-    printf "%s" "${1//\'/\'\'}"
+    local q="'" qq="''"
+    printf "%s" "${1//$q/$qq}"
+}
+
+# Quote an identifier (database or role name) for SQL (doubles double quotes).
+sql_ident() {
+    local d='"' dd='""'
+    printf '"%s"' "${1//$d/$dd}"
+}
+
+# Quote a value for a libpq conninfo string, so spaces, quotes and '=' stay part of the value.
+# sed, not ${//}: Bash 3.2 and 5.2+ treat backslashes in the replacement differently.
+conninfo_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/[\\\\']/\\\\&/g")"
 }
 
 # Format an unsigned bytes count as "X.YZ MB" etc.
@@ -415,7 +448,7 @@ preflight() {
     local cmd
     for cmd in "${needed[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "$cmd not found in PATH. Install PostgreSQL client tools (e.g. 'brew install postgresql@16')."
+            log_error "$cmd not found in PATH. Install PostgreSQL client tools (e.g. 'brew install postgresql@19')."
             exit 1
         fi
         log_ok "$cmd → $(command -v "$cmd")"
@@ -518,6 +551,7 @@ gather_remote_credentials() {
         REMOTE_USER=$(ask "Remote username:")
         REMOTE_PASS=$(ask_secret "Remote password:")
         REMOTE_DB=$(ask "Remote database name:")
+        REMOTE_PARAMS=""
     fi
 }
 
@@ -795,7 +829,7 @@ SQL
     if [[ "$target" == "source" ]]; then
         psql_source -tA -F '|' -c "$sql"
     else
-        psql_local -d "$LOCAL_DB" -tA -F '|' -c "$sql"
+        psql_local -d "dbname=$(conninfo_quote "$LOCAL_DB")" -tA -F '|' -c "$sql"
     fi
 }
 
@@ -869,7 +903,7 @@ unmatched AS (
     WHERE NOT EXISTS (SELECT 1 FROM tables t WHERE t.qname ILIKE e.pattern)
 )
 SELECT
-    pg_size_pretty(pg_database_size('$(sql_escape "$REMOTE_DB")')),
+    pg_size_pretty(pg_database_size(current_database())),
     pg_size_pretty(COALESCE(SUM(bytes) FILTER (WHERE NOT is_excluded), 0)),
     pg_size_pretty(COALESCE(SUM(bytes) FILTER (WHERE is_excluded), 0)),
     (
@@ -1359,7 +1393,6 @@ choose_per_table_restore() {
 
 prep_local_db() {
     log_step "Preparing local database"
-    export PGPASSWORD="$LOCAL_PASS"
 
     if [[ "$RESTORE_MODE" == "clean" ]]; then
         log_warn "About to ${C_BOLD}DROP${C_RESET} local database '$LOCAL_DB' and recreate it."
@@ -1375,15 +1408,15 @@ prep_local_db() {
             FROM pg_stat_activity
             WHERE datname = '$(sql_escape "$LOCAL_DB")' AND pid <> pg_backend_pid();
         " >/dev/null || true
-        psql_local -d postgres -c "DROP DATABASE IF EXISTS \"$LOCAL_DB\";"
-        psql_local -d postgres -c "CREATE DATABASE \"$LOCAL_DB\" OWNER \"$LOCAL_USER\";"
+        psql_local -d postgres -c "DROP DATABASE IF EXISTS $(sql_ident "$LOCAL_DB");"
+        psql_local -d postgres -c "CREATE DATABASE $(sql_ident "$LOCAL_DB") OWNER $(sql_ident "$LOCAL_USER");"
         log_ok "Clean local database ready."
     else
         log_info "$RESTORE_MODE mode — keeping existing local DB '$LOCAL_DB'."
         if ! psql_local -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$(sql_escape "$LOCAL_DB")';" | grep -q 1; then
             log_warn "'$LOCAL_DB' does not exist."
             confirm "Create it?" y || { log_error "Cannot restore into missing DB."; exit 1; }
-            (( DRY_RUN )) || psql_local -d postgres -c "CREATE DATABASE \"$LOCAL_DB\" OWNER \"$LOCAL_USER\";"
+            (( DRY_RUN )) || psql_local -d postgres -c "CREATE DATABASE $(sql_ident "$LOCAL_DB") OWNER $(sql_ident "$LOCAL_USER");"
             log_ok "Created '$LOCAL_DB'."
         fi
     fi
@@ -1402,7 +1435,6 @@ do_restore() {
         return 0
     fi
 
-    export PGPASSWORD="$LOCAL_PASS"
     local extra_args=()
     case "$RESTORE_MODE" in
         backfill)
@@ -1422,8 +1454,8 @@ do_restore() {
 
     local rc=0
     set +e
-    pg_restore \
-        -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -d "$LOCAL_DB" \
+    PGPASSWORD="$LOCAL_PASS" pg_restore \
+        -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -d "dbname=$(conninfo_quote "$LOCAL_DB")" \
         -j "$JOBS" \
         --no-owner \
         --no-privileges \
@@ -1453,7 +1485,7 @@ post_restore() {
 
     if confirm "Run ANALYZE on local DB to refresh planner stats?" y; then
         (( DRY_RUN )) || PGPASSWORD="$LOCAL_PASS" psql -h "$LOCAL_HOST" -p "$LOCAL_PORT" \
-            -U "$LOCAL_USER" -d "$LOCAL_DB" -c "ANALYZE;" >/dev/null
+            -U "$LOCAL_USER" -d "dbname=$(conninfo_quote "$LOCAL_DB")" -c "ANALYZE;" >/dev/null
         log_ok "ANALYZE done."
     fi
 
@@ -1500,7 +1532,7 @@ SQL
         for s in "${risky[@]}"; do echo " ${C_YELLOW}- $s${C_RESET}"; done
         log_warn "These are great for fast restore but unsafe for normal use."
         log_warn "Revert them in your postgresql.conf and restart Postgres:"
-        log_warn " brew services restart postgresql@16"
+        log_warn " brew services restart postgresql@19"
     fi
 }
 
@@ -1537,7 +1569,7 @@ main() {
         full-sync)
             gather_remote_credentials
             gather_local_credentials
-            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB}_dump"
+            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB//\//_}_dump"
             log_info "Dump will land in: ${C_BOLD}$DUMP_DIR${C_RESET}"
 
             test_source_connection
@@ -1564,7 +1596,7 @@ main() {
             ;;
         dump-only)
             gather_remote_credentials
-            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB}_dump"
+            DUMP_DIR="$DUMP_BASE_DIR/${REMOTE_DB//\//_}_dump"
             log_info "Dump will land in: ${C_BOLD}$DUMP_DIR${C_RESET}"
 
             test_source_connection

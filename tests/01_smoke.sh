@@ -53,6 +53,9 @@ check "glob_to_like star"     "%.users" "$(glob_to_like '*.users')"
 check "glob_to_ere star"      ".*.users" "$(glob_to_ere '*.users')"
 check "sql_escape quote"      "a''b"    "$(sql_escape "a'b")"
 check "humanize bytes (B)"    "500 B"   "$(humanize_bytes 500)"
+check "sql_ident quote"       '"a""b"'  "$(sql_ident 'a"b')"
+check "conninfo_quote"        "'a b\\'c\\\\d'" "$(conninfo_quote "a b'c\\d")"
+check "umask owner-only"      "0077"    "$(umask)"
 
 parse_remote_url "postgres://alice:s%40fe@db.example.com:5433/mydb?sslmode=require"
 check "parse host" "db.example.com" "$REMOTE_HOST"
@@ -60,6 +63,13 @@ check "parse port" "5433"           "$REMOTE_PORT"
 check "parse user" "alice"          "$REMOTE_USER"
 check "parse pass" "s@fe"           "$REMOTE_PASS"
 check "parse db"   "mydb"           "$REMOTE_DB"
+check "parse sslmode param" " sslmode='require'" "$REMOTE_PARAMS"
+check "conninfo quotes values" \
+    "host='db.example.com' port='5433' user='alice' dbname='my db' keepalives=1 keepalives_idle=60 keepalives_interval=15 keepalives_count=10 connect_timeout=30 sslmode='require'" \
+    "$(make_conninfo "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "my db")"
+
+parse_remote_url "postgres://alice:pw@db:5432/mydb?schema=public&ssl=true&password=x&sslpassword=y" 2>/dev/null
+check "params: keep TLS, drop others and secrets" " sslmode='require'" "$REMOTE_PARAMS"
 
 rm -f "$TMP" "$TMP.bak"
 

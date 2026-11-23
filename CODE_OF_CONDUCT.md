@@ -12,8 +12,7 @@ The Code applies to all project spaces — this repository, its issue tracker, p
 
 If you experience or witness behavior that violates the Code of Conduct, please report it privately to the maintainers:
 
-- **Email:** `conduct@<your-domain>` (replace with a real address before publishing the repo)
-- **Or open a private security advisory:** <https://github.com/nixrajput/pg-sync/security/advisories/new>
+- **Open a private advisory:** <https://github.com/nixrajput/pg-sync/security/advisories/new>
 
 Reports are confidential. Maintainers will acknowledge receipt within **72 hours** and follow the enforcement guidelines published with the Contributor Covenant.
 

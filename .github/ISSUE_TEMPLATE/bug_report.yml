@@ -52,7 +52,7 @@ body:
     attributes:
       label: PostgreSQL client version
       description: Output of `pg_dump --version`
-      placeholder: "pg_dump (PostgreSQL) 16.4"
+      placeholder: "pg_dump (PostgreSQL) 19.0"
     validations:
       required: true
 
