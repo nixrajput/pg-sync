@@ -11,8 +11,8 @@
 # • Pre-dump and post-restore stats (size + row count, paginated)
 # • Detects and warns about dangerous postgresql.conf settings
 #
-# Source: https://github.com/<your-username>/pg-sync (edit before publish)
-# License: MIT (edit before publish)
+# Source: https://github.com/nixrajput/pg-sync
+# License: MIT
 #
 # Usage:
 # ./sync_rds_to_local.sh # interactive
@@ -448,7 +448,7 @@ preflight() {
     local cmd
     for cmd in "${needed[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "$cmd not found in PATH. Install PostgreSQL client tools (e.g. 'brew install postgresql@16')."
+            log_error "$cmd not found in PATH. Install PostgreSQL client tools (e.g. 'brew install postgresql@19')."
             exit 1
         fi
         log_ok "$cmd → $(command -v "$cmd")"
@@ -1532,7 +1532,7 @@ SQL
         for s in "${risky[@]}"; do echo " ${C_YELLOW}- $s${C_RESET}"; done
         log_warn "These are great for fast restore but unsafe for normal use."
         log_warn "Revert them in your postgresql.conf and restart Postgres:"
-        log_warn " brew services restart postgresql@16"
+        log_warn " brew services restart postgresql@19"
     fi
 }
 

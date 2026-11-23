@@ -17,10 +17,9 @@ If you are on an older release than the latest, please upgrade first — the iss
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue.** Use one of these private channels instead:
+**Please do not open a public GitHub issue.** Report the issue privately through GitHub's private vulnerability reporting:
 
-1. **GitHub Security Advisories** (preferred): <https://github.com/nixrajput/pg-sync/security/advisories/new>
-2. **Email:** `security@<your-domain>` (replace with a real address before publishing the repo)
+<https://github.com/nixrajput/pg-sync/security/advisories/new>
 
 Include in your report:
 
