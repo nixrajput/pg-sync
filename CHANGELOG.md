@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The local password now goes to `pg_restore` alone. Before, it was exported to every later child process.
 - A `/` in a database name no longer moves the dump directory outside the dump base directory.
 - CI and release workflows now pin every action by commit SHA and download shellcheck at a pinned, checksum-verified version.
+- SECURITY.md and CODE_OF_CONDUCT.md now send private reports to GitHub advisories. The placeholder email addresses are gone.
+
+### Changed
+
+- The Homebrew formula, install docs and hints now recommend the PostgreSQL 19 client tools (`postgresql@19`) instead of 16.
 
 ## [1.0.0] - 2026-05-23
 

@@ -84,9 +84,9 @@ pg-sync --dry-run     # validate inputs and print plan; no DB writes
 
 - **Bash 3.2+** (macOS ships 3.2.57; any modern Linux is 4+).
 - **PostgreSQL client tools**: `pg_dump`, `pg_restore`, `psql`. Install via:
-  - macOS: `brew install postgresql@16`
-  - Debian/Ubuntu: `apt install postgresql-client-16`
-  - RHEL/Fedora: `dnf install postgresql16`
+  - macOS: `brew install postgresql@19`
+  - Debian/Ubuntu: `apt install postgresql-client-19`
+  - RHEL/Fedora: `dnf install postgresql19`
 
 ## Project Layout
 
