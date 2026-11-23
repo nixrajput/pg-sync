@@ -28,11 +28,17 @@ lint:  ## Static-check the script (bash -n + shellcheck if available)
 	fi
 	@echo "    OK"
 
-test:  ## Run smoke tests under tests/
+test:  ## Run smoke tests under tests/ with each Bash found (macOS /bin/bash is 3.2)
 	@if [[ -d tests ]] && ls tests/*.sh >/dev/null 2>&1; then \
-		for t in tests/*.sh; do \
-			echo "==> $$t"; \
-			bash "$$t" || exit 1; \
+		seen=""; \
+		for sh in bash /bin/bash; do \
+			v=$$("$$sh" -c 'echo "$$BASH_VERSION"' 2>/dev/null) || continue; \
+			[[ " $$seen " == *" $$v "* ]] && continue; \
+			seen="$$seen $$v"; \
+			for t in tests/*.sh; do \
+				echo "==> $$t (bash $$v)"; \
+				"$$sh" "$$t" || exit 1; \
+			done; \
 		done; \
 		echo "    All tests passed"; \
 	else \

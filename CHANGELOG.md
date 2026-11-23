@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-23
+
+### Fixed
+
+- On Bash 3.2 (the macOS default), runs with all tables, no exclusions or an emptied exclusion list no longer stop with an `unbound variable` error.
+- A `+` or `\` in a connection URL (for example in the password) now stays as typed. pg-sync decodes only `%XX` escapes, as libpq does.
+
 ## [1.1.0] - 2026-11-23
 
 ### Security
@@ -48,6 +55,7 @@ Initial public release.
 - GitHub Actions workflow that builds and publishes releases on tag push.
 - Project documentation: README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, RELEASING runbook, plus issue/PR templates.
 
-[Unreleased]: https://github.com/nixrajput/pg-sync/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/nixrajput/pg-sync/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/nixrajput/pg-sync/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nixrajput/pg-sync/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nixrajput/pg-sync/releases/tag/v1.0.0

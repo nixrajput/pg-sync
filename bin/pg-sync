@@ -29,7 +29,7 @@ umask 077 # dumps and logs hold copied database data: keep them owner-only
 # Constants
 # ============================================================================
 readonly SCRIPT_NAME="pg-sync"
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 
 DUMP_BASE_DIR="${PG_SYNC_DUMP_DIR:-$HOME/pg_dumps}"
@@ -257,9 +257,15 @@ ask_choice_back() {
 # ============================================================================
 # URL parsing (percent-decoded)
 # ============================================================================
+# Decode %XX escapes only, as libpq does: '+' and backslashes stay literal.
 url_decode() {
-    local s="${1//+/ }"
-    printf '%b' "${s//%/\\x}"
+    local s="$1" out="" byte re='%([0-9A-Fa-f]{2})'
+    while [[ "$s" =~ $re ]]; do
+        printf -v byte '%b' "\\x${BASH_REMATCH[1]}"
+        out+="${s%%"${BASH_REMATCH[0]}"*}$byte"
+        s="${s#*"${BASH_REMATCH[0]}"}"
+    done
+    printf '%s' "$out$s"
 }
 
 # Parse postgres://user:pass@host[:port]/dbname[?params] into REMOTE_* globals.
@@ -753,10 +759,10 @@ build_dump_args() {
     INCLUDE_ARGS=()
     EXCLUDE_ARGS=()
     local t
-    for t in "${INCLUDE_TABLE_DATA[@]}"; do
+    for t in ${INCLUDE_TABLE_DATA[@]+"${INCLUDE_TABLE_DATA[@]}"}; do
         INCLUDE_ARGS+=(--table="$t")
     done
-    for t in "${EXCLUDE_TABLE_DATA[@]}"; do
+    for t in ${EXCLUDE_TABLE_DATA[@]+"${EXCLUDE_TABLE_DATA[@]}"}; do
         EXCLUDE_ARGS+=(--exclude-table-data="$t")
     done
 }
@@ -968,7 +974,7 @@ handle_unmatched_exclusions() {
                 done
                 (( skip == 0 )) && kept+=("$t")
             done
-            EXCLUDE_TABLE_DATA=("${kept[@]}")
+            EXCLUDE_TABLE_DATA=(${kept[@]+"${kept[@]}"})
             log_ok "Exclusion list now has ${#EXCLUDE_TABLE_DATA[@]} entry/entries."
             ;;
         3)
@@ -1001,10 +1007,10 @@ handle_unmatched_exclusions() {
                 done
                 (( is_um == 0 )) && rebuilt+=("$t")
             done
-            rebuilt+=("${replacements[@]}")
-            EXCLUDE_TABLE_DATA=("${rebuilt[@]}")
+            rebuilt+=(${replacements[@]+"${replacements[@]}"})
+            EXCLUDE_TABLE_DATA=(${rebuilt[@]+"${rebuilt[@]}"})
             log_ok "Updated list:"
-            for t in "${EXCLUDE_TABLE_DATA[@]}"; do echo " - $t"; done
+            for t in ${EXCLUDE_TABLE_DATA[@]+"${EXCLUDE_TABLE_DATA[@]}"}; do echo " - $t"; done
             log_info "Re-validating against source…"
             test_source_and_estimate_size
             ;;

@@ -48,7 +48,11 @@ sed -i.bak '/^trap/d' "$TMP"
 source "$TMP" 2>/dev/null
 
 check "url_decode encoded @" "p@ss"     "$(url_decode 'p%40ss')"
-check "url_decode + to space" "a b"     "$(url_decode 'a+b')"
+check "url_decode keeps +"    "a+b"     "$(url_decode 'a+b')"
+check "url_decode %2B"        "a+b"     "$(url_decode 'a%2Bb')"
+check "url_decode %25 once"   "1%2B"    "$(url_decode '1%252B')"
+check "url_decode keeps \\"   'a\nb\x41\c\' "$(url_decode 'a\nb\x41\c\')"
+check "url_decode UTF-8"      "é"       "$(url_decode '%C3%A9')"
 check "glob_to_like star"     "%.users" "$(glob_to_like '*.users')"
 check "glob_to_ere star"      ".*.users" "$(glob_to_ere '*.users')"
 check "sql_escape quote"      "a''b"    "$(sql_escape "a'b")"
@@ -70,6 +74,18 @@ check "conninfo quotes values" \
 
 parse_remote_url "postgres://alice:pw@db:5432/mydb?schema=public&ssl=true&password=x&sslpassword=y" 2>/dev/null
 check "params: keep TLS, drop others and secrets" " sslmode='require'" "$REMOTE_PARAMS"
+
+parse_remote_url 'postgres://alice:p+w%2B%25\x41\c@db:5432/mydb'
+check "parse pass keeps + and \\" 'p+w+%\x41\c' "$REMOTE_PASS"
+
+# Bash 3.2 and 4.0-4.3 treat an empty "${arr[@]}" as unbound under set -u.
+test_source_and_estimate_size() { :; }
+check "build_dump_args with no tables" "0 0" \
+    "$(build_dump_args && echo "${#INCLUDE_ARGS[@]} ${#EXCLUDE_ARGS[@]}")"
+check "drop every unmatched exclusion" "0" \
+    "$(EXCLUDE_TABLE_DATA=(a); handle_unmatched_exclusions a <<< 2 >/dev/null 2>&1 && echo "${#EXCLUDE_TABLE_DATA[@]}")"
+check "replace every unmatched exclusion with nothing" "0" \
+    "$(EXCLUDE_TABLE_DATA=(a); handle_unmatched_exclusions a <<< $'1\n' >/dev/null 2>&1 && echo "${#EXCLUDE_TABLE_DATA[@]}")"
 
 rm -f "$TMP" "$TMP.bak"
 
