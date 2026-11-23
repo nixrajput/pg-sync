@@ -17,8 +17,19 @@ Thumbs.db
 # Local-only secrets and dumps
 *.local.sh
 .env
-.env.local
+.env.*
+!.env.example
+.pgpass
+*.pem
+*.key
+*.p12
+*.pfx
 /pg_dumps/
+*_dump/
+*.dump
+*.sqlite
+*.sqlite3
+*.db
 
 # Logs
 *.log
