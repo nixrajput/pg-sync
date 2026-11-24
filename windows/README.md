@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/nixrajput/pg-sync/main/scripts/inst
 pg-sync --help
 ```
 
-You'll also need PostgreSQL client tools on `PATH`. Install via the official PostgreSQL Windows installer and add `C:\Program Files\PostgreSQL\16\bin` to your `PATH`.
+You'll also need PostgreSQL client tools on `PATH`. Install via the official PostgreSQL Windows installer and add `C:\Program Files\PostgreSQL\19\bin` to your `PATH`.
 
 ## Option 3 — Native PowerShell port (future)
 

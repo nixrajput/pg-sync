@@ -20,7 +20,7 @@ class PgSync < Formula
   license "MIT"
 
   depends_on "bash"
-  depends_on "postgresql@16" => :recommended
+  depends_on "postgresql@19" => :recommended
 
   def install
     bin.install "bin/pg-sync"
