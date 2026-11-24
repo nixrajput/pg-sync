@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-24
+
+### Changed
+
+- The in-repo Homebrew formula now points at the v1.1.1 release tarball and checksum, matching the tap.
+
 ## [1.1.1] - 2026-11-23
 
 ### Fixed
@@ -55,7 +61,8 @@ Initial public release.
 - GitHub Actions workflow that builds and publishes releases on tag push.
 - Project documentation: README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, RELEASING runbook, plus issue/PR templates.
 
-[Unreleased]: https://github.com/nixrajput/pg-sync/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/nixrajput/pg-sync/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/nixrajput/pg-sync/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/nixrajput/pg-sync/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nixrajput/pg-sync/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nixrajput/pg-sync/releases/tag/v1.0.0
